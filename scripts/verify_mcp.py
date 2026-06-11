@@ -15,7 +15,7 @@ Requires:
 Steps performed:
     1. Send JSON-RPC 'initialize' → print server capabilities
     2. Send JSON-RPC 'tools/list' → print all tool names and schemas
-    3. Send JSON-RPC 'tools/call' with search_shop_catalog("black t-shirt") → print results
+    3. Send JSON-RPC 'tools/call' with search_catalog("black t-shirt") → print results
     4. Handle errors with clear diagnostics (connection refused, 404, rate-limited, etc.)
 """
 
@@ -25,6 +25,11 @@ import json
 import os
 import sys
 from pathlib import Path
+
+# Fix Windows terminal encoding for Unicode symbols (✓, ✗, ⚠)
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import httpx
 from dotenv import load_dotenv
@@ -228,7 +233,7 @@ def step_tools_list(client: httpx.Client, url: str) -> list[dict]:
     print()
 
     expected_tools = {
-        "search_shop_catalog",
+        "search_catalog",
         "get_product_details",
         "update_cart",
         "get_cart",
@@ -275,8 +280,10 @@ def step_test_search(client: httpx.Client, url: str) -> dict | None:
         url,
         method="tools/call",
         params={
-            "name": "search_shop_catalog",
-            "arguments": {"query": "black t-shirt"},
+            "name": "search_catalog",
+            "arguments": {
+                "catalog": {"query": "black t-shirt"},
+            },
         },
         req_id=3,
     )
@@ -327,8 +334,6 @@ def main() -> int:
         )
         return 1
 
-    mcp_url = f"https://{store_domain}/api/2025-01/graphql.json"
-    # The MCP endpoint for Shopify Storefront
     mcp_url = f"https://{store_domain}/api/mcp"
 
     header(f"Vastra MCP Verification Spike")

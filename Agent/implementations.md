@@ -15,24 +15,34 @@
 | Deployment | HF Spaces Docker SDK, SqliteSaver on /data | Free tier, persistent volume |
 | MCP verification approach | Raw httpx JSON-RPC (no MCP library) | De-risk spike before committing to langchain-mcp-adapters |
 | Catalog seeding | Shopify product CSV import format | Standard import path; 75 variants across 26 products covering 8 categories |
+| Catalog tool name | `search_catalog` (not `search_shop_catalog`) | PRD assumed `search_shop_catalog` but actual Shopify MCP exposes `search_catalog` — all agent code must use the real name |
 
-## MCP Endpoint Details (Pending Verification)
+## MCP Endpoint Details (Verified ✓)
 
 **Endpoint:** `https://{SHOPIFY_STORE_DOMAIN}/api/mcp`
 **Protocol:** JSON-RPC 2.0
 **Protocol Version:** 2025-03-26
+**Server:** storefront-renderer v0.1.0
+**Authentication:** None (public endpoint — storefront password must be disabled on dev stores)
 
-### Expected Tools (from PRD)
+### Verified Tools
 
-| Tool Name | Purpose | Verified |
-|-----------|---------|----------|
-| search_shop_catalog | Search products by natural language query | ⏳ Run verify_mcp.py |
-| get_product_details | Get full product details by ID/handle | ⏳ Run verify_mcp.py |
-| update_cart | Add/remove/update cart line items | ⏳ Run verify_mcp.py |
-| get_cart | Get current cart state | ⏳ Run verify_mcp.py |
-| search_shop_policies_and_faqs | Search store policies and FAQ content | ⏳ Run verify_mcp.py |
+| # | Tool Name | PRD Name | Params | Status |
+|---|-----------|----------|--------|--------|
+| 1 | `search_catalog` | `search_shop_catalog` | `meta: object, catalog: object` (catalog.query for search text) | ✅ Verified — **name differs from PRD** |
+| 2 | `get_cart` | `get_cart` | `cart_id: string` | ✅ Verified |
+| 3 | `update_cart` | `update_cart` | `cart_id, add_items, update_items, remove_line_ids, buyer_identity, delivery_addresses_to_add, delivery_addresses_to_replace, selected_delivery_options, discount_codes, gift_card_codes, note` | ✅ Verified |
+| 4 | `search_shop_policies_and_faqs` | `search_shop_policies_and_faqs` | `query: string, context: string` | ✅ Verified |
+| 5 | `get_product_details` | `get_product_details` | `product_id: string, options: object, country: string, language: string` | ✅ Verified |
 
-> **Note:** Tool names and schemas will be confirmed when the developer runs `python scripts/verify_mcp.py` against their configured dev store. Any deviations from the expected list will be recorded here.
+### Key Observations from MCP Spike
+
+- **Price format:** Prices are returned in **minor units** (paise). ₹399 → `39900`. Frontend must divide by 100.
+- **Product IDs:** GID format — `gid://shopify/Product/8808632549464`, `gid://shopify/ProductVariant/44221789601880`
+- **UCP version in response:** `2026-04-08` — responses include a UCP wrapper with capabilities metadata
+- **search_catalog params:** Uses nested object `{"catalog": {"query": "..."}}` not a flat `{"query": "..."}`
+- **Images:** Served from `cdn.shopify.com` — the placeholder URLs from import were replaced with Shopify CDN SVGs
+- **Capabilities:** Server supports `tools`, `prompts`, `resources`, `logging` with `listChanged: true`
 
 ### MCP Response Handling
 

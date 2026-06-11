@@ -21,7 +21,7 @@ Vastra is a conversational shopping agent for Shopify storefronts. A buyer chats
 ## Architecture Overview
 Supervisor (router–specialist) architecture:
 1. Buyer message enters → Supervisor classifies intent via structured output → routes to one specialist
-2. Stylist (discovery): search_shop_catalog, get_product_details → product_cards event
+2. Stylist (discovery): search_catalog, get_product_details → product_cards event
 3. Cart (transactions): get_cart, update_cart → interrupt → confirm → cart_update event
 4. Support (policy): search_shop_policies_and_faqs → text reply
 5. Preference Extractor runs asynchronously post-turn on the 8B model → upserts buyer_profile
