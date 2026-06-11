@@ -9,10 +9,36 @@
 | Extraction model | Llama 3.1 8B Instant | Right-sized for background profile extraction; preserves 70B quota |
 | Database access | psycopg 3, raw SQL | Portfolio convention — no ORM |
 | MCP transport | Streamable HTTP via langchain-mcp-adapters | Storefront MCP uses JSON-RPC over HTTP |
-| Prompt injection boundary | Tool output wrapped in <tool_data> delimiters | MCP results are untrusted input |
+| Prompt injection boundary | Tool output wrapped in &lt;tool_data&gt; delimiters | MCP results are untrusted input |
 | Cart safety | LangGraph interrupt() + Command(resume=) | Write-gating via platform primitive |
 | Frontend | React 18 + Vite, plain JS, hand-written CSS | Portfolio convention — no UI libraries |
 | Deployment | HF Spaces Docker SDK, SqliteSaver on /data | Free tier, persistent volume |
+| MCP verification approach | Raw httpx JSON-RPC (no MCP library) | De-risk spike before committing to langchain-mcp-adapters |
+| Catalog seeding | Shopify product CSV import format | Standard import path; 75 variants across 26 products covering 8 categories |
+
+## MCP Endpoint Details (Pending Verification)
+
+**Endpoint:** `https://{SHOPIFY_STORE_DOMAIN}/api/mcp`
+**Protocol:** JSON-RPC 2.0
+**Protocol Version:** 2025-03-26
+
+### Expected Tools (from PRD)
+
+| Tool Name | Purpose | Verified |
+|-----------|---------|----------|
+| search_shop_catalog | Search products by natural language query | ⏳ Run verify_mcp.py |
+| get_product_details | Get full product details by ID/handle | ⏳ Run verify_mcp.py |
+| update_cart | Add/remove/update cart line items | ⏳ Run verify_mcp.py |
+| get_cart | Get current cart state | ⏳ Run verify_mcp.py |
+| search_shop_policies_and_faqs | Search store policies and FAQ content | ⏳ Run verify_mcp.py |
+
+> **Note:** Tool names and schemas will be confirmed when the developer runs `python scripts/verify_mcp.py` against their configured dev store. Any deviations from the expected list will be recorded here.
+
+### MCP Response Handling
+
+The verify script handles two possible response formats:
+1. Standard JSON-RPC response body
+2. SSE-style or newline-delimited JSON (fallback parsing)
 
 ## API Endpoints (Planned)
 
@@ -51,6 +77,20 @@ See backend/db/schema.sql — 4 application tables: sessions, messages, buyer_pr
 | CartDrawer | Slide-over from cart_update events |
 | CheckoutBanner | Shopify checkout link handoff |
 | SessionList | History via GET /api/sessions |
+
+## Seed Catalog Summary
+
+| Category | Products | Variant Rows | Price Range (₹) |
+|----------|----------|-------------|----------------|
+| T-Shirts | 5 | 16 | 399–549 |
+| Oversized Tees | 3 | 9 | 599–699 |
+| Jeans | 2 | 6 | 999–1099 |
+| Joggers | 3 | 8 | 699–799 |
+| Dresses | 3 | 9 | 799–1099 |
+| Kurtas | 3 | 9 | 699–1299 |
+| Sneakers | 3 | 11 | 799–1499 |
+| Accessories | 4 | 7 | 299–599 |
+| **Total** | **26** | **75** | **299–1499** |
 
 ## Environment Variables
 
