@@ -8,7 +8,9 @@
 | LLM routing | Groq primary → Gemini Flash fallback | Zero cost; fastest free tier |
 | Extraction model | Llama 3.1 8B Instant | Right-sized for background profile extraction; preserves 70B quota |
 | Database access | psycopg 3, raw SQL | Portfolio convention — no ORM |
-| MCP transport | Streamable HTTP via langchain-mcp-adapters | Storefront MCP uses JSON-RPC over HTTP |
+| MCP transport | `streamable_http` via langchain-mcp-adapters 0.3.0 | Storefront MCP uses JSON-RPC over HTTP; verified the adapter accepts this transport name (Stage 3) |
+| MCP load API | `MultiServerMCPClient({server: {transport, url}}).get_tools()` | Single async call returns all tools; partitioned in-process by `SCOPES` |
+| Groq error classes | `groq.RateLimitError` / `groq.APIConnectionError` (not `openai.*`) | langchain-groq ≥1.x ships the `groq` SDK; `openai` is not a dependency |
 | Prompt injection boundary | Tool output wrapped in &lt;tool_data&gt; delimiters | MCP results are untrusted input |
 | Cart safety | LangGraph interrupt() + Command(resume=) | Write-gating via platform primitive |
 | Frontend | React 18 + Vite, plain JS, hand-written CSS | Portfolio convention — no UI libraries |
@@ -126,6 +128,44 @@ This is deliberately narrow — it covers only the constructs the queries actual
 
 ### Tests
 `backend/tests/test_db_queries.py` — 8 tests (7 against live Postgres with per-test cascade cleanup, 1 full SQLite-translation round-trip). `backend/tests/conftest.py` forces the Windows selector event-loop policy. `pytest.ini` pins `asyncio_mode=auto` with session-scoped loops so the shared pool spans tests.
+
+## MCP Tool Layer & LLM Fallback (Implemented — Stage 3)
+
+Source: `backend/mcp/client.py`, `backend/mcp/sanitize.py`, `backend/llm/fallback.py`, `backend/tests/conftest.py`.
+
+### Scoped tool loading (`mcp/client.py`)
+- `SCOPES: dict[str, set[str]]` — the per-agent allow-lists; union == the 5 verified tools:
+  - `stylist` → `{search_catalog, get_product_details}`
+  - `cart` → `{get_cart, update_cart}`
+  - `support` → `{search_shop_policies_and_faqs}`
+  - Uses the **verified** catalog name `search_catalog` (the PRD/task snippet's `search_shop_catalog` is wrong — corrected in Stage 1).
+- `load_scoped_tools(store_domain) -> dict[str, list]` — builds `https://{store_domain}/api/mcp`, loads via `MultiServerMCPClient(...).get_tools()`, logs discovered names (INFO), warns on any missing expected tool (WARNING), returns the `SCOPES` partition (keys always present; an unmet scope is an empty list).
+- `_fetch_tools()` tries transports `("streamable_http", "http", "sse")` in order, advancing only when a transport name raises `ValueError`; real network/protocol errors propagate. Raises `RuntimeError` if every transport is rejected.
+
+### Injection boundary (`mcp/sanitize.py`)
+- `sanitize_tool_output(raw) -> "<tool_data>\n{raw}\n</tool_data>"` — fixed, well-known delimiter (the model is told via the system prompt that everything inside is data, never instructions). No attempt to detect/strip injection strings.
+- `wrap_tool_call(fn)` — decorator applying the sanitiser to a tool's return value; handles sync and `async` callables and coerces non-str returns via `str()`.
+- `TOOL_DATA_INSTRUCTION` — the exact sentence pasted into every system prompt (Stage 4 `prompts.py` will reference it).
+
+### LLM fallback (`llm/fallback.py`)
+- Model constants: `PRIMARY_MODEL="llama-3.3-70b-versatile"`, `SMALL_MODEL="llama-3.1-8b-instant"`, `FALLBACK_MODEL="gemini-2.0-flash"`.
+- `FallbackChat(temperature=0.0, small=False)` — builds `ChatGroq` (primary) + `ChatGoogleGenerativeAI` (fallback).
+  - `async ainvoke(messages, **kwargs)` — primary with one retry on `RateLimitError` (backoff `_backoff_seconds(attempt)=2**attempt`, patchable in tests); on `RateLimitError`/`APIConnectionError` after retry, sets `_fallback_used=True` and calls Gemini.
+  - `fallback_used` property — read by the `done` SSE event.
+- `FallbackChatStreaming(FallbackChat)` — adds `async astream(messages, **kwargs)` over `.astream()`; same retry/failover, but failover to Gemini happens **only before the first chunk is emitted** (a mid-stream failure re-raises, since restarting would duplicate output).
+- **New dependency:** `groq>=0.11` added to requirements.txt — imported directly for its exception classes (already present transitively via `langchain-groq`, now explicit).
+
+### Test fixtures (`tests/conftest.py`)
+- `FakeMCPTools` — registers the 5 tool names as real `langchain_core.tools.StructuredTool`s (accurate name + arg schema) whose bodies return canned JSON. Accessors: `.all() -> list`, `.by_name() -> dict`.
+- Canned response shapes (paise prices, GID ids — recorded from the Stage 1 verify spike):
+  - `search_catalog(query)` → `{"products":[{product_id, title, description, price_range:{min,max,currency}, image_url, variants:[{variant_id,title,price,available}]}]}`
+  - `get_product_details(product_id)` → `{product_id, title, description, vendor, product_type, tags, image_urls, variants:[…]}`
+  - `get_cart(cart_id)` → `{cart_id, checkout_url, currency, subtotal, total_quantity, lines:[{line_id,variant_id,title,quantity,unit_price,line_price}]}`
+  - `update_cart(cart_id, add_items?)` → same cart shape with updated quantities/subtotal
+  - `search_shop_policies_and_faqs(query, context?)` → `{"results":[{title, content, source}]}`
+- `fake_scoped_tools` fixture → partitions `FakeMCPTools.all()` through the production `SCOPES` (same `dict[str,list]` shape as `load_scoped_tools`).
+- `fake_llm` fixture → `FakeLLM` with `ainvoke` (returns `AIMessage`) and `astream` (yields `AIMessageChunk`s) and a `fallback_used` property — no network.
+- **All Stage 3+ tests use these doubles; none hit the live store or an LLM API.**
 
 ## Component Map (Planned)
 

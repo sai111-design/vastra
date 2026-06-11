@@ -1,11 +1,24 @@
 # Progress Tracker — Vastra
 
 ## Current Status
-- **Last completed stage:** 2
-- **Next stage:** Stage 3 — MCP Client & Agents
+- **Last completed stage:** 3
+- **Next stage:** Stage 4 — LangGraph supervisor graph + agent nodes
 - **Blockers:** None
 
 ## Changelog
+
+### 2026-06-11 — Stage 3: MCP Tool Layer + LLM Fallback
+- ✅ backend/mcp/client.py — `load_scoped_tools(store_domain)` loads tools from Storefront MCP and partitions by `SCOPES` (stylist/cart/support); logs discovered tool names at INFO; warns on missing tools; transport-candidate loop (`streamable_http` → `http` → `sse`) for adapter-version resilience
+- ✅ backend/mcp/sanitize.py — `sanitize_tool_output()` wraps any string in `<tool_data>` delimiters; `wrap_tool_call()` decorator (sync + async, coerces non-str); `TOOL_DATA_INSTRUCTION` constant referenced by every system prompt
+- ✅ backend/llm/fallback.py — `FallbackChat` (Groq primary, 1 retry on rate-limit w/ exponential backoff, transparent Gemini Flash failover) + `FallbackChatStreaming` (`.astream()` variant, pre-first-chunk failover only); both expose `.fallback_used`
+- ✅ backend/tests/conftest.py — `FakeMCPTools` (5 tools as real `StructuredTool`s w/ canned JSON recorded from Stage 1 spike), `fake_scoped_tools` fixture (same `dict[str,list]` shape as loader), `fake_llm` fixture (`FakeLLM` with `ainvoke`/`astream`)
+- ✅ backend/tests/test_mcp_client.py — 14 tests (scopes, partition, transport URL, missing-tool warning, http-transport fallback, sanitiser, injection containment, decorator)
+- ✅ backend/tests/test_llm_fallback.py — 11 tests (model selection, happy path, retry, rate-limit/connection failover, `fallback_used` flag, streaming + streaming failover)
+- ✅ 26 Stage-3 tests pass; full suite 34/34 (incl. 8 pre-existing DB tests)
+- ✅ requirements.txt — added `groq>=0.11` (we import `groq.RateLimitError`/`groq.APIConnectionError` directly; transitive via langchain-groq but now explicit)
+- ⚠️ SCOPES uses verified tool name `search_catalog` (NOT the PRD/task-snippet's `search_shop_catalog`) — consistent with the Stage 1 correction; union of scopes = the 5 verified tools
+- ⚠️ Task snippet said Groq raises `openai.RateLimitError`; actually `langchain-groq` ≥1.x uses the `groq` SDK with its own `groq.RateLimitError`/`groq.APIConnectionError` (and `openai` is not even installed). Caught the `groq` classes.
+- 🐛 Fixed: `backend/mcp/` package shadowed the installed top-level `mcp` package under pytest's prepend import mode (B008)
 
 ### 2026-06-11 — Stage 2: Database Foundation & Config
 - ✅ backend/config.py — Settings(BaseSettings) over all .env vars; DB_BACKEND literal; cached get_settings() singleton; validators (SHOPIFY_STORE_DOMAIN non-empty, DATABASE_URL required for postgres)
@@ -51,6 +64,7 @@
 | B005 | Auth "password authentication failed for user vastra" — native PostgreSQL (v13/v18) shadowing host ports 5432/5433 | Stage 2 | ✅ Fixed | Stage 2 — published container on host port 55432 |
 | B006 | SQLite "near \"(\": syntax error" — bare datetime('now') invalid in a DEFAULT clause | Stage 2 connection.py | ✅ Fixed | Stage 2 — translate now() → CURRENT_TIMESTAMP for SQLite |
 | B007 | `docker compose up postgres` failed: frontend service had no image/build context | Stage 2 docker-compose.yml | ✅ Fixed | Stage 2 — added image: node:20-alpine to frontend service |
+| B008 | `ImportError: cannot import name 'ClientSession' from 'mcp'` under pytest — local `backend/mcp/` package shadowed the installed `mcp` package because pytest (prepend import mode) put `backend/` on sys.path (no `backend/__init__.py`) | Stage 3 conftest.py / client.py | ✅ Fixed | Stage 3 — added `backend/__init__.py` so the test basedir is the project root, not `backend/`; `from mcp import …` now resolves to the installed package |
 
 ## Assumptions Made
 | Assumption | Stage | Risk Level |
@@ -62,7 +76,13 @@
 | Product IDs use GID format (gid://shopify/Product/...) | 1 | Low — verified |
 | search_catalog uses nested params: `{catalog: {query: "..."}}` not flat | 1 | Low — verified |
 | UCP response version is 2026-04-08 (may change) | 1 | Medium — monitor |
-| langchain-mcp-adapters supports streamable HTTP transport | 0 | Medium — verified in Stage 3 |
+| langchain-mcp-adapters supports streamable HTTP transport | 0 | ✅ Verified Stage 3 — v0.3.0 accepts `streamable_http` (aliases `http`, `streamable-http`) |
+| langchain-mcp-adapters pinned at 0.3.0 (req says >=0.1); `MultiServerMCPClient({...}).get_tools()` is the load API | 3 | Low |
+| Loader tries transports `streamable_http`→`http`→`sse`, advancing only on `ValueError` (unknown transport); other errors propagate | 3 | Low |
+| Groq raises its OWN SDK exceptions (`groq.RateLimitError`/`groq.APIConnectionError`), not `openai.*` (openai not installed); `groq>=0.11` added to requirements | 3 | Low |
+| FakeMCP canned shapes: prices in paise (int), GID product/variant ids, `search_catalog`→`{products:[…]}`, `get_cart`/`update_cart`→`{cart_id,checkout_url,subtotal,lines:[…]}`, policies→`{results:[…]}` | 3 | Medium — recorded from Stage 1 spike; live schema may drift |
+| `backend` is a regular package (`backend/__init__.py` added) so pytest inserts the project root, not `backend/`, on sys.path | 3 | Low |
+| FallbackChatStreaming only fails over to Gemini before the first chunk is emitted; a mid-stream Groq failure propagates (restart would duplicate output) | 3 | Low |
 | LangGraph interrupt() works with PostgresSaver checkpointer | 0 | Medium — verified in Stage 5 |
 | Postgres pool: min_size=1, max_size=10 — ample for a single-process demo backend | 2 | Low |
 | Pool open timeout 10s, per-connect/checkout timeout 30s — fail fast on a dead DB | 2 | Low |
