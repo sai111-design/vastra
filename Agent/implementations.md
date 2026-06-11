@@ -16,6 +16,12 @@
 | MCP verification approach | Raw httpx JSON-RPC (no MCP library) | De-risk spike before committing to langchain-mcp-adapters |
 | Catalog seeding | Shopify product CSV import format | Standard import path; 75 variants across 26 products covering 8 categories |
 | Catalog tool name | `search_catalog` (not `search_shop_catalog`) | PRD assumed `search_shop_catalog` but actual Shopify MCP exposes `search_catalog` — all agent code must use the real name |
+| DB connection driver | psycopg 3 `AsyncConnectionPool` (pkg `psycopg-pool`) + `aiosqlite` | Async, pooled Postgres; single shared SQLite connection for HF Spaces |
+| Pool sizing / row factory | min 1 / max 10, autocommit=True, `dict_row` | Right-sized for a single-process demo; every query returns dicts and self-commits |
+| Backend-agnostic SQL | One Postgres-dialect query set; thin `SqliteConn` translates at runtime | Keeps `queries.py` written once; SQLite path stays minimal (Stage 1 §"Keep the SQLite path simple") |
+| SQLite timestamp default | `now()` → `CURRENT_TIMESTAMP` | A bare function call is invalid in a SQLite `DEFAULT` clause |
+| Host Postgres port | `55432` (container stays 5432) | Dev box runs native PostgreSQL v13 (5432) and v18 (5433); high port avoids the clash |
+| Windows async loop | Force `WindowsSelectorEventLoopPolicy` in tests | psycopg async cannot run on the Windows ProactorEventLoop (non-issue in Linux Docker) |
 
 ## MCP Endpoint Details (Verified ✓)
 
@@ -73,8 +79,53 @@ The verify script handles two possible response formats:
 | error | { message, recoverable } | Error bubble |
 | done | { turn_id, fallback_used } | Stream close |
 
-## Database Schema (Planned)
-See backend/db/schema.sql — 4 application tables: sessions, messages, buyer_profiles, tool_call_log. LangGraph checkpoint tables created by checkpointer.setup().
+## Database Layer (Implemented — Stage 2)
+
+Source: `backend/db/schema.sql`, `backend/db/connection.py`, `backend/db/queries.py`.
+
+4 application tables: sessions, messages, buyer_profiles, tool_call_log (+ `idx_messages_session`, `idx_toolcalls_session`). LangGraph checkpoint tables are created later by `checkpointer.setup()`.
+
+### Connection management (`connection.py`)
+- **Postgres:** lazily-opened `psycopg_pool.AsyncConnectionPool` (min 1, max 10), connections configured with `row_factory=dict_row` and `autocommit=True`.
+- **SQLite:** one shared `aiosqlite` connection, `row_factory=aiosqlite.Row`, `PRAGMA foreign_keys=ON` (cascade deletes).
+- `get_conn()` — async context manager yielding a backend-appropriate wrapper (`PostgresConn` / `SqliteConn`) exposing the same surface: `fetch_one`, `fetch_all`, `execute`, `insert_returning_id`.
+- `init_db()` — reads `schema.sql`; Postgres runs each statement as-is, SQLite runs a translated script. Idempotent (`CREATE TABLE/INDEX IF NOT EXISTS`).
+- `close_db()` — releases pool / shared connection (shutdown + tests).
+- Connection failures are caught and re-raised as `RuntimeError` with context.
+
+### SQLite translation approach
+Queries are authored once in the Postgres dialect (`%s` placeholders, `now()`). The `SqliteConn` wrapper and schema loader apply purely textual translation — no second query set:
+
+| Context | Postgres | SQLite |
+|---------|----------|--------|
+| Placeholder | `%s` | `?` |
+| Current time (runtime + DEFAULT) | `now()` | `CURRENT_TIMESTAMP` |
+| Timestamp type (DDL) | `TIMESTAMPTZ` | `TEXT` |
+| Auto-id (DDL) | `BIGSERIAL PRIMARY KEY` | `INTEGER PRIMARY KEY AUTOINCREMENT` |
+| `INSERT … RETURNING id` | native RETURNING | clause stripped; `cursor.lastrowid` |
+
+This is deliberately narrow — it covers only the constructs the queries actually use, not arbitrary SQL.
+
+### Query functions (`queries.py`) — all implemented, all parameterised
+| Function | Returns |
+|----------|---------|
+| `create_session(session_id, store_domain)` | dict (id, store_domain, cart_id, created_at, last_active) |
+| `get_session(session_id)` | dict \| None |
+| `list_sessions()` | list[dict] — last_active DESC, each with truncated `preview` (first message, ≤120 chars) |
+| `update_session_activity(session_id)` | None — touches last_active |
+| `update_session_cart(session_id, cart_id)` | None |
+| `insert_message(session_id, role, content, events_json=None)` | int (new id) |
+| `get_messages(session_id)` | list[dict] — created_at ASC |
+| `upsert_buyer_profile(session_id, sizes_json, budget_min, budget_max, style_tags, last_category)` | None — INSERT … ON CONFLICT DO UPDATE |
+| `get_buyer_profile(session_id)` | dict \| None |
+| `log_tool_call(session_id, agent, tool_name, args_json, status, confirmed, latency_ms)` | int (new id) |
+
+### New dependencies (added to requirements.txt this stage)
+- `psycopg-pool>=3.2` — async connection pool (separate from `psycopg[binary]`).
+- `aiosqlite>=0.20` — async SQLite driver for the HF Spaces deployment path.
+
+### Tests
+`backend/tests/test_db_queries.py` — 8 tests (7 against live Postgres with per-test cascade cleanup, 1 full SQLite-translation round-trip). `backend/tests/conftest.py` forces the Windows selector event-loop policy. `pytest.ini` pins `asyncio_mode=auto` with session-scoped loops so the shared pool spans tests.
 
 ## Component Map (Planned)
 
