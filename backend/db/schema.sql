@@ -1,6 +1,6 @@
 -- Vastra application schema (PostgreSQL canonical form).
 -- The SQLite deployment target applies textual translations at load time;
--- see backend/db/connection.py (_translate_for_sqlite).
+-- see backend/db/connection.py (_translate_schema_for_sqlite).
 
 CREATE TABLE IF NOT EXISTS sessions (
     id            TEXT PRIMARY KEY,

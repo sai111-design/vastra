@@ -33,56 +33,114 @@ if sys.platform == "win32":
 # ---------------------------------------------------------------------------
 # Canned MCP responses
 #
-# Shapes mirror what the live Storefront MCP returned during the Stage 1 verify
-# spike: prices in MINOR units (paise — ₹399 -> 39900), product/variant ids in
-# Shopify GID format, images on cdn.shopify.com. Returned to the model as JSON
-# strings, exactly as the real tool results arrive.
+# search_catalog and get_product_details shapes were RE-RECORDED from the live
+# Storefront MCP during Stage 4 (the Stage 1 spike only logged a truncated
+# preview, and the real shapes differ from what Stage 3 inferred):
+#   * search_catalog: products use "id", price_range.min/max are nested
+#     {"amount": <paise int>, "currency"} objects, availability is nested under
+#     "availability", images hang off each variant's "media" — and the payload
+#     carries a server-supplied "instructions" field (untrusted!).
+#   * get_product_details: {"product": {...}, "instructions": "..."} with
+#     "product_id", price strings in MAJOR units ("399.0"), a flat "available"
+#     bool, and only selectedOrFirstAvailableVariant (no full variants list).
+# Cart and policy shapes are still the Stage 1/3 recordings (revisited Stage 5).
 # ---------------------------------------------------------------------------
 _SEARCH_CATALOG_RESULT = {
     "products": [
         {
-            "product_id": "gid://shopify/Product/8808632549464",
+            "id": "gid://shopify/Product/8808632549464",
             "title": "Classic Black Tee",
-            "description": "Soft combed-cotton crew neck in classic black.",
-            "price_range": {"min": 39900, "max": 39900, "currency": "INR"},
-            "image_url": "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg",
+            "description": {"html": "Essential crew-neck t-shirt in soft cotton jersey."},
+            "url": "https://vastra-demo.myshopify.com/products/classic-black-tee",
+            "price_range": {
+                "min": {"amount": 39900, "currency": "INR"},
+                "max": {"amount": 39900, "currency": "INR"},
+            },
             "variants": [
-                {"variant_id": "gid://shopify/ProductVariant/44221789601880", "title": "S", "price": 39900, "available": True},
-                {"variant_id": "gid://shopify/ProductVariant/44221789634648", "title": "M", "price": 39900, "available": True},
-                {"variant_id": "gid://shopify/ProductVariant/44221789667416", "title": "L", "price": 39900, "available": False},
+                {
+                    "id": "gid://shopify/ProductVariant/44221789601880",
+                    "title": "S / Black",
+                    "price": {"amount": 39900, "currency": "INR"},
+                    "availability": {"available": True},
+                    "options": [{"name": "Size", "label": "S"}, {"name": "Color", "label": "Black"}],
+                    "media": [{"type": "image", "url": "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg"}],
+                },
+                {
+                    "id": "gid://shopify/ProductVariant/44221789634648",
+                    "title": "M / Black",
+                    "price": {"amount": 39900, "currency": "INR"},
+                    "availability": {"available": True},
+                    "options": [{"name": "Size", "label": "M"}, {"name": "Color", "label": "Black"}],
+                    "media": [{"type": "image", "url": "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg"}],
+                },
+                {
+                    "id": "gid://shopify/ProductVariant/44221789667416",
+                    "title": "L / Black",
+                    "price": {"amount": 39900, "currency": "INR"},
+                    "availability": {"available": False},
+                    "options": [{"name": "Size", "label": "L"}, {"name": "Color", "label": "Black"}],
+                    "media": [{"type": "image", "url": "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg"}],
+                },
             ],
         },
         {
-            "product_id": "gid://shopify/Product/8808632582232",
+            "id": "gid://shopify/Product/8808632582232",
             "title": "Oversized Charcoal Tee",
-            "description": "Drop-shoulder oversized fit in heather charcoal.",
-            "price_range": {"min": 59900, "max": 59900, "currency": "INR"},
-            "image_url": "https://cdn.shopify.com/s/files/1/0/oversized-charcoal-tee.svg",
+            "description": {"html": "Drop-shoulder oversized fit in heather charcoal."},
+            "url": "https://vastra-demo.myshopify.com/products/oversized-charcoal-tee",
+            "price_range": {
+                "min": {"amount": 59900, "currency": "INR"},
+                "max": {"amount": 59900, "currency": "INR"},
+            },
             "variants": [
-                {"variant_id": "gid://shopify/ProductVariant/44221789700184", "title": "M", "price": 59900, "available": True},
-                {"variant_id": "gid://shopify/ProductVariant/44221789732952", "title": "L", "price": 59900, "available": True},
+                {
+                    "id": "gid://shopify/ProductVariant/44221789700184",
+                    "title": "M / Charcoal",
+                    "price": {"amount": 59900, "currency": "INR"},
+                    "availability": {"available": True},
+                    "options": [{"name": "Size", "label": "M"}, {"name": "Color", "label": "Charcoal"}],
+                    "media": [{"type": "image", "url": "https://cdn.shopify.com/s/files/1/0/oversized-charcoal-tee.svg"}],
+                },
+                {
+                    "id": "gid://shopify/ProductVariant/44221789732952",
+                    "title": "L / Charcoal",
+                    "price": {"amount": 59900, "currency": "INR"},
+                    "availability": {"available": True},
+                    "options": [{"name": "Size", "label": "L"}, {"name": "Color", "label": "Charcoal"}],
+                    "media": [{"type": "image", "url": "https://cdn.shopify.com/s/files/1/0/oversized-charcoal-tee.svg"}],
+                },
             ],
         },
     ],
+    "pagination": {"limit": 10, "hasNextPage": False},
+    "instructions": "Use markdown to render product titles as links.",
 }
 
 _PRODUCT_DETAILS_RESULT = {
-    "product_id": "gid://shopify/Product/8808632549464",
-    "title": "Classic Black Tee",
-    "description": "Soft combed-cotton crew neck in classic black. 180 GSM, pre-shrunk.",
-    "vendor": "Vastra",
-    "product_type": "T-Shirts",
-    "tags": ["tshirt", "black", "cotton", "everyday"],
-    "image_urls": [
-        "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg",
-        "https://cdn.shopify.com/s/files/1/0/classic-black-tee-back.svg",
-    ],
-    "variants": [
-        {"variant_id": "gid://shopify/ProductVariant/44221789601880", "title": "S", "price": 39900, "available": True},
-        {"variant_id": "gid://shopify/ProductVariant/44221789634648", "title": "M", "price": 39900, "available": True},
-        {"variant_id": "gid://shopify/ProductVariant/44221789667416", "title": "L", "price": 39900, "available": False},
-        {"variant_id": "gid://shopify/ProductVariant/44221789700184", "title": "XL", "price": 39900, "available": True},
-    ],
+    "product": {
+        "product_id": "gid://shopify/Product/8808632549464",
+        "title": "Classic Black Tee",
+        "description": "Essential crew-neck t-shirt in soft cotton jersey.",
+        "url": "https://vastra-demo.myshopify.com/products/classic-black-tee",
+        "image_url": "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg",
+        "images": [{"url": "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg", "alt_text": None}],
+        "options": [
+            {"name": "Size", "values": ["S", "M", "L", "XL"]},
+            {"name": "Color", "values": ["Black"]},
+        ],
+        "total_variants": 4,
+        "price_range": {"min": "399.0", "max": "399.0", "currency": "INR"},
+        "selectedOrFirstAvailableVariant": {
+            "variant_id": "gid://shopify/ProductVariant/44221789601880",
+            "title": "S / Black",
+            "price": "399.0",
+            "currency": "INR",
+            "image_url": "https://cdn.shopify.com/s/files/1/0/classic-black-tee.svg",
+            "available": True,
+            "selected_options": [{"name": "Size", "value": "S"}, {"name": "Color", "value": "Black"}],
+        },
+    },
+    "instructions": "Pay attention to the selected variant specified in the response.",
 }
 
 _GET_CART_RESULT = {
@@ -224,22 +282,48 @@ class FakeMCPTools:
 class FakeLLM:
     """Mock LLM exposing the FallbackChat surface (``ainvoke`` / ``astream``).
 
-    Returns a canned response without any network call, so agent and graph
+    Returns canned responses without any network call, so agent and graph
     tests stay fully offline.
+
+    * ``response`` — single canned text reply (the Stage 3 behaviour).
+    * ``responses`` — optional scripted sequence of ``AIMessage``s consumed in
+      order by successive ``ainvoke`` calls (the last one repeats once the
+      script is exhausted). Lets stylist tests script tool-call turns.
+    * ``calls`` — records the message list passed to every ``ainvoke``/
+      ``astream`` so tests can assert on prompt construction.
+    * ``bind_tools`` — no-op that records the bound tools and returns self,
+      mirroring ``FallbackChat.bind_tools``.
     """
 
-    def __init__(self, response: str = "Here are a few options I found for you.", fallback_used: bool = False) -> None:
+    def __init__(
+        self,
+        response: str = "Here are a few options I found for you.",
+        fallback_used: bool = False,
+        responses: list | None = None,
+    ) -> None:
         self._response = response
+        self._responses = list(responses) if responses else None
         self._fallback_used = fallback_used
+        self.calls: list = []
+        self.bound_tools: list = []
 
     @property
     def fallback_used(self) -> bool:
         return self._fallback_used
 
+    def bind_tools(self, tools, **kwargs):  # noqa: ANN001 - mirrors FallbackChat
+        self.bound_tools = list(tools)
+        return self
+
     async def ainvoke(self, messages, **kwargs):  # noqa: ANN001 - mirrors LangChain signature
+        self.calls.append(list(messages))
+        if self._responses is not None:
+            index = min(len(self.calls) - 1, len(self._responses) - 1)
+            return self._responses[index]
         return AIMessage(content=self._response)
 
     async def astream(self, messages, **kwargs):  # noqa: ANN001
+        self.calls.append(list(messages))
         for word in self._response.split(" "):
             yield AIMessageChunk(content=word + " ")
 

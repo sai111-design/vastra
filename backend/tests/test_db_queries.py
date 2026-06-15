@@ -24,9 +24,14 @@ from backend.db.connection import close_db, get_conn, init_db
 # ---------------------------------------------------------------------------
 # Postgres fixtures
 # ---------------------------------------------------------------------------
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def _schema():
-    """Create the schema once for the whole Postgres test session."""
+@pytest_asyncio.fixture(scope="session")
+async def pg_schema():
+    """Create the schema once for the Postgres test session.
+
+    Explicitly requested (NOT autouse) so the Postgres gate only applies to the
+    tests that actually need Postgres — ``test_sqlite_translation_path`` runs
+    regardless of the configured backend.
+    """
 
     if get_settings().db_backend != "postgres":
         pytest.skip("Postgres backend not configured")
@@ -38,7 +43,7 @@ async def _schema():
 
 
 @pytest_asyncio.fixture
-async def session_id():
+async def session_id(pg_schema):
     """Yield a fresh session id and delete it (cascading) on teardown."""
 
     sid = "pg-" + uuid.uuid4().hex
@@ -118,7 +123,7 @@ async def test_log_tool_call_returns_id(session_id):
     assert log_id > 0
 
 
-async def test_list_sessions_order_and_preview():
+async def test_list_sessions_order_and_preview(pg_schema):
     older = "pg-" + uuid.uuid4().hex
     newer = "pg-" + uuid.uuid4().hex
     try:

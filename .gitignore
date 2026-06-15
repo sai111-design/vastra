@@ -5,3 +5,6 @@ dist/
 .venv/
 *.pyc
 .ruff_cache/
+.pytest_cache/
+.vibe-audits/
+*.db

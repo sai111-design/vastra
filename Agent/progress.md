@@ -1,11 +1,31 @@
 # Progress Tracker — Vastra
 
 ## Current Status
-- **Last completed stage:** 3
-- **Next stage:** Stage 4 — LangGraph supervisor graph + agent nodes
+- **Last completed stage:** 4 — 🏁 **MILESTONE A achieved** (CLI chat → supervisor routing → Stylist → live MCP → grounded product cards)
+- **Next stage:** Stage 5 — Cart, Support, and Preference Extractor agents
 - **Blockers:** None
 
 ## Changelog
+
+### 2026-06-12 — Stage 4: Supervisor + Stylist Agent (MILESTONE A)
+- ✅ backend/agents/state.py — `VastraState(MessagesState)` with session_id, buyer_profile, product_context, cart_id, cart_snapshot, pending_action, route, fallback_used, turn_count; cart fields reserved now so Stage 4 checkpoints stay compatible with Stage 5
+- ✅ backend/agents/prompts.py — versioned constants (`PROMPT_VERSION = "2026-06-12.1"`): SUPERVISOR_PROMPT (4-route JSON classification w/ cart-verb rule, ambiguity→stylist, greeting+request routes by request), STYLIST_PROMPT (≤4 picks, empty-results drop-weakest-constraint-retry-once-then-clarify, per-tool price-unit guidance, 1 tool-call example, splices `TOOL_DATA_INSTRUCTION`), SUPPORT/CART/EXTRACTOR placeholders for Stage 5; `{buyer_profile}` marker injected via `.replace()` (prompts are full of JSON braces — `.format()` would need escaping everywhere)
+- ✅ backend/agents/supervisor.py — async `supervisor_node` (FallbackChat temp 0 via lazy `_get_llm()` singleton, patched in tests), `parse_route()` (bare JSON → code-fence strip → regex scan → default "stylist"), `trim_messages(messages, budget)` (keeps leading SystemMessage + newest messages, drops oldest-middle, always keeps the newest even over budget; ~4 chars/token estimate), increments turn_count
+- ✅ backend/agents/stylist.py — `make_stylist_node(tools, llm=None)`: bounded ReAct loop counting **executed tool calls** (≤ MAX_TOOL_CALLS_PER_TURN, mid-response cutoff for parallel calls, dangling tool_calls answered then one forced final text reply); every result through `sanitize_tool_output()`; `build_product_cards()` from raw tool JSON only (per-tool extractors for the two live shapes, details **merges** into search cards without losing variant ids); product_context replaced when products shown; intra-turn scratchpad NOT written to state (small checkpoints, no dangling tool_calls poisoning next turn)
+- ✅ backend/agents/graph.py — `build_graph(tools_by_agent, checkpointer=None, *, stylist_llm=None)`; `_route_or_end` maps unwired-but-legal routes (cart/support/respond) to END so a valid classification can't crash the Stage 4 graph (deviation from the task's raw `lambda s: s["route"]`, which would KeyError on cart/support)
+- ✅ backend/llm/fallback.py — added `FallbackChat.bind_tools(tools)` binding both primary and fallback models (agents stay provider-free per rules.md)
+- ✅ scripts/cli_chat.py — MILESTONE A harness: loads live scoped tools, builds graph (no checkpointer), REPL printing route/turn/fallback flag, assistant text, full product_cards payload, and product_context; continuity via result-state echo
+- ✅ backend/tests/test_agents_supervisor.py — 19 tests: 4 routing intents, malformed→stylist default, profile injection, turn_count, parse_route variants (fences/prose/unknown route/non-object), trim_messages (under-budget/middle-drop/oversized-newest/empty), 3 compiled-graph smoke tests (stylist path, respond ends w/o specialist, unwired cart route ends cleanly)
+- ✅ backend/tests/test_agents_stylist.py — 14 tests: FakeMCP tool calls + loop termination, sanitiser fencing, profile injection, cap enforcement (serial + mid-parallel-response), unknown tool error, cards-from-tool-JSON (ids/urls/images/price normalization/availability), cards-ignore-model-text, details-merge keeps variants, ≤4 cards, malformed-JSON skip, B009 content-block regression, product_context update/no-op, fallback_used propagation
+- ✅ backend/tests/conftest.py — search_catalog + get_product_details canned shapes **re-recorded from the live store** (Stage 3's inferred shapes were wrong — see Assumptions); FakeLLM upgraded: scripted `responses` list (last repeats), `calls` recording, `bind_tools` no-op
+- ✅ Full suite 68/68 (26 Stage 3 + 8 DB + 34 Stage 4); agent tests fully offline
+- ✅ MILESTONE A verified live: "show me black t-shirts under 600" → route=stylist → live search_catalog → "The Classic Black Tee (₹399)…" + product_cards (real GID/URL/CDN image/₹399.00 INR/4 variants); "return policy" → support; "add the black tee to my cart" → cart; "thanks!" → respond
+- ⚠️ Routes cart/support/respond end at the supervisor with no assistant message in Stage 4 (nodes land in Stage 5); CLI prints an explicit note for those turns
+- ⚠️ product_cards payload travels in the final AIMessage's `additional_kwargs` (not a state key) — keeps VastraState exactly as specced and binds the payload to the message for history replay
+- ⚠️ Card price amounts are normalised to **major-unit strings** ("399.00") at extraction; the Stage 1 "frontend divides by 100" note is superseded (units differ per tool — see implementations.md)
+- 🐛 Fixed: B009 (below) — live adapter tools return MCP content-block lists, not strings
+
+### 2026-06-11 — Stage 3: MCP Tool Layer + LLM Fallback
 
 ### 2026-06-11 — Stage 3: MCP Tool Layer + LLM Fallback
 - ✅ backend/mcp/client.py — `load_scoped_tools(store_domain)` loads tools from Storefront MCP and partitions by `SCOPES` (stylist/cart/support); logs discovered tool names at INFO; warns on missing tools; transport-candidate loop (`streamable_http` → `http` → `sse`) for adapter-version resilience
@@ -65,6 +85,7 @@
 | B006 | SQLite "near \"(\": syntax error" — bare datetime('now') invalid in a DEFAULT clause | Stage 2 connection.py | ✅ Fixed | Stage 2 — translate now() → CURRENT_TIMESTAMP for SQLite |
 | B007 | `docker compose up postgres` failed: frontend service had no image/build context | Stage 2 docker-compose.yml | ✅ Fixed | Stage 2 — added image: node:20-alpine to frontend service |
 | B008 | `ImportError: cannot import name 'ClientSession' from 'mcp'` under pytest — local `backend/mcp/` package shadowed the installed `mcp` package because pytest (prepend import mode) put `backend/` on sys.path (no `backend/__init__.py`) | Stage 3 conftest.py / client.py | ✅ Fixed | Stage 3 — added `backend/__init__.py` so the test basedir is the project root, not `backend/`; `from mcp import …` now resolves to the installed package |
+| B009 | Stylist extracted 0 product cards from the LIVE store while offline tests passed. langchain-mcp-adapters tools (`response_format="content_and_artifact"`) return a **list of MCP content blocks** `[{"type":"text","text":"<json>"}]` from `.ainvoke()`, not a plain JSON string like FakeMCP's StructuredTools. `str(list)` produced a Python repr that broke `json.loads`. | Stage 4 stylist.py (live CLI) | ✅ Fixed | Stage 4 — added `_content_to_text()` to flatten content-block lists before sanitise/extract; offline regression test added (`test_live_adapter_content_block_results_are_flattened`) |
 
 ## Assumptions Made
 | Assumption | Stage | Risk Level |
@@ -72,7 +93,7 @@
 | ~~Storefront MCP endpoint is available on dev stores at /api/mcp~~ | 0 | ✅ Verified in Stage 1 |
 | ~~Shopify MCP uses JSON-RPC 2.0 with protocol version 2025-03-26~~ | 1 | ✅ Verified — storefront-renderer v0.1.0 |
 | ~~PRD tool name search_shop_catalog~~ → actual name is `search_catalog` | 1 | ✅ Corrected — all code must use `search_catalog` |
-| Prices returned in minor units (paise) — must divide by 100 for display | 1 | Low — verified |
+| ~~Prices returned in minor units (paise) — must divide by 100 for display~~ → **units differ per tool**: `search_catalog` sends minor units (39900=₹399), `get_product_details` sends major-unit strings ("399.0"). Stylist normalises both to major-unit strings at card extraction | 1→4 | ✅ Corrected Stage 4 |
 | Product IDs use GID format (gid://shopify/Product/...) | 1 | Low — verified |
 | search_catalog uses nested params: `{catalog: {query: "..."}}` not flat | 1 | Low — verified |
 | UCP response version is 2026-04-08 (may change) | 1 | Medium — monitor |
@@ -80,7 +101,15 @@
 | langchain-mcp-adapters pinned at 0.3.0 (req says >=0.1); `MultiServerMCPClient({...}).get_tools()` is the load API | 3 | Low |
 | Loader tries transports `streamable_http`→`http`→`sse`, advancing only on `ValueError` (unknown transport); other errors propagate | 3 | Low |
 | Groq raises its OWN SDK exceptions (`groq.RateLimitError`/`groq.APIConnectionError`), not `openai.*` (openai not installed); `groq>=0.11` added to requirements | 3 | Low |
-| FakeMCP canned shapes: prices in paise (int), GID product/variant ids, `search_catalog`→`{products:[…]}`, `get_cart`/`update_cart`→`{cart_id,checkout_url,subtotal,lines:[…]}`, policies→`{results:[…]}` | 3 | Medium — recorded from Stage 1 spike; live schema may drift |
+| ~~FakeMCP canned shapes: prices in paise (int)…~~ — Stage 3's search/details shapes were INFERRED and wrong. Re-recorded live in Stage 4: `search_catalog` products use `id` (not `product_id`), `price_range.min/max` are `{amount,currency}` objects (paise int), `availability.available` is nested, images hang off each variant's `media[]`, payload carries an untrusted `instructions` field. `get_product_details` = `{product:{product_id, price_range w/ "399.0" strings, selectedOrFirstAvailableVariant}, instructions}` | 3→4 | ✅ Corrected Stage 4 (cart/policy shapes still Stage 3 — revisit Stage 5) |
+| LangGraph 1.2.4 (venv): `MessagesState` import from `langgraph.graph`; async node fns return partial-state dicts; `StateGraph`/`START`/`END`/`add_conditional_edges(node, selector, mapping)` all as specced; `.compile(checkpointer=…)` | 4 | Low — verified |
+| Supervisor uses prompt-engineered JSON output (parse + default) rather than `.with_structured_output()` — robust to Groq tool-calling quirks and gives a clean "default to stylist" failure path | 4 | Low |
+| Stylist ReAct loop is hand-rolled (not `create_react_agent`) — needed per-turn control over the tool-call CAP, the sanitiser boundary on every result, and product_cards extraction from raw tool JSON | 4 | Low |
+| Tool budget counts EXECUTED tool calls (not loop iterations); parallel tool_calls beyond the cap are answered with a "budget exhausted" ToolMessage so the provider contract (every tool_call needs a response) holds | 4 | Low |
+| product_cards rides in the final AIMessage's `additional_kwargs` (keeps VastraState as specced); intra-turn tool/scratchpad messages are NOT persisted to state | 4 | Low |
+| MCP adapter tools return `content_and_artifact` → `.ainvoke()` yields a content-block LIST, flattened by `_content_to_text` before json parse (Bug B009) | 4 | Medium — live-verified, but adapter behaviour may shift across versions |
+| Graph maps unwired-but-legal routes (cart/support/respond) to END via `_route_or_end` so a valid classification can't KeyError before Stage 5 wires those nodes | 4 | Low |
+| Live store domain is `pmcidd-iv.myshopify.com` (product URLs/CDN images resolve against it) | 4 | Low |
 | `backend` is a regular package (`backend/__init__.py` added) so pytest inserts the project root, not `backend/`, on sys.path | 3 | Low |
 | FallbackChatStreaming only fails over to Gemini before the first chunk is emitted; a mid-stream Groq failure propagates (restart would duplicate output) | 3 | Low |
 | LangGraph interrupt() works with PostgresSaver checkpointer | 0 | Medium — verified in Stage 5 |

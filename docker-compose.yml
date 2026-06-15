@@ -2,8 +2,9 @@ services:
   postgres:
     image: postgres:16-alpine
     ports:
-      # High host port avoids clashing with native PostgreSQL installs (5432/5433).
-      - "55432:5432"
+      # High host port avoids clashing with native PostgreSQL installs (5432/5433);
+      # loopback-only so the dev-credentialed DB is never exposed on the LAN.
+      - "127.0.0.1:55432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:

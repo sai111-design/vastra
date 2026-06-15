@@ -54,9 +54,30 @@ class FallbackChat:
 
     @property
     def fallback_used(self) -> bool:
-        """Whether the most recent call fell over to the Gemini fallback."""
+        """Whether ANY call on this instance has fallen over to Gemini.
+
+        Sticky per instance, never reset: callers that need per-turn accuracy
+        must construct a fresh wrapper per turn (the stylist node does). A
+        per-call reset would under-report a mid-turn failover followed by a
+        recovered call in the same ReAct loop.
+        """
 
         return self._fallback_used
+
+    def bind_tools(self, tools: list[Any], **kwargs: Any) -> "FallbackChat":
+        """Bind tool definitions to both the primary and fallback models.
+
+        Mirrors ``BaseChatModel.bind_tools`` so agent nodes can hand their
+        scoped MCP tools to the wrapper without ever touching the underlying
+        providers. Binding must hit both models — a failover mid-turn has to
+        keep the same tool-calling contract. Mutates and returns ``self``;
+        each agent node owns its own instance, so the shared-state risk of
+        in-place binding does not arise.
+        """
+
+        self.primary = self.primary.bind_tools(tools, **kwargs)
+        self.fallback = self.fallback.bind_tools(tools, **kwargs)
+        return self
 
     async def ainvoke(self, messages: Any, **kwargs: Any) -> Any:
         """Invoke the model, returning a single response message."""

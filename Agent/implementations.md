@@ -24,6 +24,13 @@
 | SQLite timestamp default | `now()` → `CURRENT_TIMESTAMP` | A bare function call is invalid in a SQLite `DEFAULT` clause |
 | Host Postgres port | `55432` (container stays 5432) | Dev box runs native PostgreSQL v13 (5432) and v18 (5433); high port avoids the clash |
 | Windows async loop | Force `WindowsSelectorEventLoopPolicy` in tests | psycopg async cannot run on the Windows ProactorEventLoop (non-issue in Linux Docker) |
+| Supervisor structured output | Prompt-engineered JSON + `parse_route()` (NOT `.with_structured_output()`) | Robust to Groq tool-calling quirks; clean "default to stylist" path on any parse failure |
+| Stylist agent loop | Hand-rolled bounded ReAct (NOT `create_react_agent`) | Needs per-turn tool-call CAP, sanitiser on every result, and product_cards from raw tool JSON |
+| product_cards transport | Final AIMessage `additional_kwargs` | Keeps `VastraState` exactly as specced; binds payload to the message for history replay |
+| Prompt context injection | `str.replace("{buyer_profile}", …)` (NOT `str.format`) | Prompts are full of literal JSON braces; `.format` would require escaping them all |
+| Tool budget accounting | Count EXECUTED tool calls; answer over-cap parallel calls with a "budget exhausted" ToolMessage | Enforces the 4-call cap while honouring the provider rule that every tool_call needs a response |
+| MCP result flattening | `_content_to_text()` before sanitise/parse | Adapter tools (`content_and_artifact`) return content-block lists, not strings (Bug B009) |
+| Unwired-route safety | `_route_or_end` maps cart/support/respond → END | A legal Stage-4 classification can't KeyError before Stage 5 wires those nodes |
 
 ## MCP Endpoint Details (Verified ✓)
 
@@ -166,6 +173,52 @@ Source: `backend/mcp/client.py`, `backend/mcp/sanitize.py`, `backend/llm/fallbac
 - `fake_scoped_tools` fixture → partitions `FakeMCPTools.all()` through the production `SCOPES` (same `dict[str,list]` shape as `load_scoped_tools`).
 - `fake_llm` fixture → `FakeLLM` with `ainvoke` (returns `AIMessage`) and `astream` (yields `AIMessageChunk`s) and a `fallback_used` property — no network.
 - **All Stage 3+ tests use these doubles; none hit the live store or an LLM API.**
+
+## Supervisor Graph & Stylist Agent (Implemented — Stage 4, MILESTONE A)
+
+Source: `backend/agents/{state,prompts,supervisor,stylist,graph}.py`, `scripts/cli_chat.py`, `backend/llm/fallback.py` (`bind_tools`).
+
+### State (`state.py`)
+`VastraState(MessagesState)` — inherits the `messages` channel + `add_messages` reducer; adds `session_id`, `buyer_profile`, `product_context`, `cart_id`, `cart_snapshot`, `pending_action`, `route`, `fallback_used`, `turn_count`. Cart fields are reserved at Stage 4 so checkpoints created now stay forward-compatible with the Stage 5 cart flow. `product_context` is **replaced** (not appended) each time products are shown, holding only grounding refs `{id, title, url, variant_ids}`.
+
+### Prompts (`prompts.py`)
+Versioned constants, `PROMPT_VERSION = "2026-06-12.1"`. Runtime context injected by replacing the literal `{buyer_profile}` marker (`BUYER_PROFILE_MARKER`) via `.replace()`.
+- **SUPERVISOR_PROMPT** — classifies the latest turn into `{stylist, cart, support, respond}`, emits `{"route": "..."}` only. Key rules encoded: cart requires an explicit transactional verb or cart reference (desire alone → stylist); ambiguity → stylist; greeting/thanks that also carries a request routes by the request; product-specific care Qs → stylist, store-wide policy → support.
+- **STYLIST_PROMPT** — search → ≤4 picks → warm one-line-per-pick reply. Hard rules: never state a price/URL/name/availability not in this turn's tool output; empty results → drop weakest constraint (occasion→colour→budget, keep category) and retry once, then ask ONE clarifying question; apply profile silently; per-tool price-unit guidance (search=paise, details=rupees, always write ₹ in text); splices `TOOL_DATA_INSTRUCTION`; includes one worked tool-call example.
+- **SUPPORT / CART / EXTRACTOR** — one-line placeholders (full text in Stage 5); exported now so imports are stable.
+
+### Supervisor node (`supervisor.py`)
+`supervisor_node(state) -> {"route", "turn_count"}`. Builds `[SystemMessage(SUPERVISOR_PROMPT+profile), *messages]`, trims to `CONTEXT_TOKEN_BUDGET`, calls a lazily-built shared `FallbackChat(temperature=0)` (`_get_llm()`, patched in tests), parses the route, increments `turn_count`.
+- **`trim_messages(messages, budget)`** — keeps a leading `SystemMessage` + as many newest messages as fit, dropping oldest-middle first; always keeps the newest message even if it alone exceeds budget. Token estimate: `len(str(content))//4 + 8` per message (provider-independent, no tokenizer dep).
+- **`parse_route(text)`** — bare-JSON parse → strip ``` fences → regex scan for `"route":"..."` → default `"stylist"`. Only values in `ROUTES` are accepted; everything else defaults. This is the "default to stylist on classification failure" acceptance criterion.
+- `_message_text()` flattens str-or-parts-list content (Gemini fallback can return a parts list).
+
+### Stylist node (`stylist.py`)
+`make_stylist_node(tools, llm=None)` returns an async node running a **bounded ReAct loop**:
+1. Build `[SystemMessage(STYLIST_PROMPT+profile), *trimmed messages]`; `chat = FallbackChat(temperature=0.3).bind_tools(tools)` (fresh per turn so `fallback_used` is per-turn accurate; `llm` is the test seam).
+2. Loop while the model returns `tool_calls` and **executed calls < `MAX_TOOL_CALLS_PER_TURN`**: run each call via `tool.ainvoke(args)`, append a `ToolMessage`. Over-cap parallel calls in the same response get a "budget exhausted" `ToolMessage` (not executed) so every `tool_call` is answered.
+3. If the cap is hit with calls still pending, answer the danglers and force one final text reply.
+4. Emit a **fresh** `AIMessage(content=text, additional_kwargs={"product_cards": …})` — never the model's tool-call message — so no dangling `tool_calls` reach the checkpointer. Empty model text falls back to a factless line (makes no product claims).
+
+Return: `{"messages": [final], "fallback_used": …}` plus `product_context` when products were shown. The intra-turn scratchpad (tool-call + tool-result messages) is deliberately **not** written to state.
+
+- **Sanitiser boundary:** every raw tool result goes through `sanitize_tool_output()` (→ `<tool_data>` fences) before the model sees it; the raw (unfenced) JSON is also stashed for extraction.
+- **`_content_to_text()`** flattens adapter content-block lists `[{"type":"text","text":…}]` → string before parse (Bug B009).
+
+### product_cards extraction (`build_product_cards`)
+Built **only** from `[(tool_name, raw_json), …]` collected during the loop — never model text. Per-tool extractors handle the two live shapes; results de-duplicate by product id, and a `get_product_details` result **merges into** an existing search card (`_merge_cards`: newer non-empty scalars win; variants are unioned by id so a details call — which returns only the selected variant — never strips the search result's other variant ids). Capped at 4. Price normalisation (`_to_rupees`): JSON *type* carries the unit convention — numbers are paise (`/100`), strings are already rupees → all emitted as major-unit strings (`"399.00"`). `_product_context_from_cards()` reduces cards to the `{id, title, url, variant_ids}` grounding refs stored in state.
+
+### Graph (`graph.py`)
+`build_graph(tools_by_agent, checkpointer=None, *, stylist_llm=None)`: nodes `supervisor` + `stylist`; `START→supervisor`; conditional edges via `_route_or_end` (wired route → its node, everything else → `END`) so cart/support/respond end cleanly until Stage 5; `stylist→END`. `stylist_llm` is a keyword-only test seam forwarded to the stylist node. **Deviation from the task snippet:** the raw `lambda s: s["route"]` selector would KeyError on a legal `cart`/`support` classification before those nodes exist — `_route_or_end` maps them to `END` instead.
+
+### LLM wrapper change (`fallback.py`)
+Added `FallbackChat.bind_tools(tools)` — binds tool defs to **both** primary and fallback models (a mid-turn failover must keep the same tool-calling contract) and returns `self`. Agents never import `ChatGroq`/`ChatGoogleGenerativeAI` directly (rules.md).
+
+### CLI harness (`scripts/cli_chat.py`)
+MILESTONE A verification tool (dev-only, never deployed): loads live scoped tools, builds the graph (no checkpointer), REPL that prints route/turn/fallback flag, assistant text, the full `product_cards` payload, and `product_context`. Turn-to-turn continuity comes from feeding the result state back as the next input. Sets the Windows selector loop policy + UTF-8 stdout (Bugs B004/B001).
+
+### Tests (offline)
+`test_agents_supervisor.py` (19) + `test_agents_stylist.py` (14) — both fully offline via `FakeLLM` (now scripts a `responses` sequence, records `calls`, no-op `bind_tools`) and the FakeMCP `StructuredTool`s. Full suite **68/68**.
 
 ## Component Map (Planned)
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -28,19 +29,37 @@ TOOL_DATA_INSTRUCTION = (
 _OPEN = "<tool_data>"
 _CLOSE = "</tool_data>"
 
+# Anything inside tool output that could read as one of our delimiters —
+# including case tricks and embedded whitespace — gets entity-escaped, so the
+# only live fence pair is the one this module emits. Without this, a product
+# description containing a literal "</tool_data>" would close the fence early
+# and everything after it would sit OUTSIDE the data region.
+_DELIMITER_LOOKALIKE = re.compile(r"<\s*(/?)\s*tool_data\s*>", re.IGNORECASE)
+
+
+def _neutralize_delimiters(text: str) -> str:
+    """Entity-escape delimiter look-alikes so content cannot break the fence."""
+
+    return _DELIMITER_LOOKALIKE.sub(lambda m: f"&lt;{m.group(1)}tool_data&gt;", text)
+
 
 def sanitize_tool_output(raw_output: str) -> str:
     """Wrap a raw tool result in ``<tool_data>`` delimiters.
+
+    Delimiter look-alikes inside the content are neutralised first (see
+    :data:`_DELIMITER_LOOKALIKE`) — the fence is only a boundary if content
+    cannot fabricate its own closing tag.
 
     Args:
         raw_output: The string a tool returned (already serialised JSON or text).
 
     Returns:
-        The same content fenced by the open/close delimiters, each on its own
-        line so the boundary is unambiguous in the rendered prompt.
+        The content, delimiter-escaped, fenced by the open/close delimiters,
+        each on its own line so the boundary is unambiguous in the rendered
+        prompt.
     """
 
-    return f"{_OPEN}\n{raw_output}\n{_CLOSE}"
+    return f"{_OPEN}\n{_neutralize_delimiters(raw_output)}\n{_CLOSE}"
 
 
 def wrap_tool_call(tool_func: Callable[..., Any]) -> Callable[..., Any]:
