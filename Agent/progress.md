@@ -1,11 +1,27 @@
 # Progress Tracker — Vastra
 
 ## Current Status
-- **Last completed stage:** 4 — 🏁 **MILESTONE A achieved** (CLI chat → supervisor routing → Stylist → live MCP → grounded product cards)
-- **Next stage:** Stage 5 — Cart, Support, and Preference Extractor agents
+- **Last completed stage:** 5 — Cart (interrupt-gated writes), Support (policy grounding), and Preference Extractor (async memory). The graph is complete: all 4 routes wired, cart writes gated behind `interrupt()`, buyer profiles accumulate.
+- **Next stage:** Stage 6 — FastAPI + SSE layer (sessions, /api/chat, /api/confirm driving the cart interrupt, background extraction)
 - **Blockers:** None
 
 ## Changelog
+
+### 2026-06-15 — Stage 5: Cart + Support + Preference Extractor
+- ✅ backend/agents/prompts.py — filled CART_PROMPT (write-gate rule, restate-exact-line, summarise-from-tool-payload-only, `{product_context}` marker, splices `TOOL_DATA_INSTRUCTION`), SUPPORT_PROMPT (answer ONLY from policy tool, name the section, explicit no-policy fallback, invention strictly prohibited), EXTRACTOR_PROMPT (exact JSON schema, explicit-only extraction, no inference from product views); bumped `PROMPT_VERSION` → "2026-06-15.1"; added `PRODUCT_CONTEXT_MARKER`
+- ✅ backend/agents/cart.py — `make_cart_node`: bounded ReAct loop with the `interrupt()` write-gate. update_cart → build `pending` (action_id/summary/line restating title·variant·price·qty from product_context) → `interrupt(pending)` → on `{"approved": True}` only, run update_cart (one retry + exp backoff, honest failure never a fake success) and emit `cart_update` from tool JSON; on deny → "cart unchanged", no tool call. get_cart ("show my cart") emits cart_update with no interrupt. `_bind_cart_id` injects state's cart_id (or omits for a new cart; model ids dropped)
+- ✅ backend/agents/support.py — `make_support_node`: bounded ReAct loop over `search_shop_policies_and_faqs`; cites the section; empty results → honest no-policy reply; out-of-scope tool refused (support can't reach catalog/cart)
+- ✅ backend/agents/extractor.py — `extract_preferences(...,*,llm=None)` on the 8B model (temp 0), robust JSON parse → non-empty-fields delta, never raises (errors → `{}`); `merge_profile` (sizes merge, budget/category overwrite, style_tags union+dedup capped at 12)
+- ✅ backend/agents/graph.py — wired cart + support; `_route_selector` (specialists → nodes, respond/unknown → END); `cart_llm`/`support_llm` test seams; checkpointer now REQUIRED for the cart interrupt cycle
+- ✅ backend/agents/stylist.py — enriched `product_context` entries with `price` + per-variant `{id,title}` (kept `variant_ids`) so the Cart agent can restate the exact line
+- ✅ scripts/cli_chat.py — MemorySaver checkpointer + thread_id; `_drive_turn` resolves cart interrupts via Y/N → `Command(resume=...)`; prints product_cards/cart_update/product_context; runs the extractor synchronously post-turn and prints the accumulating buyer_profile
+- ✅ backend/tests/test_agents_cart.py (8), test_agents_support.py (4), test_agents_extractor.py (11) + 1 support graph smoke in test_agents_supervisor.py = **24 new tests**; cart interrupt paths driven through a compiled graph + MemorySaver with a content-based fake LLM (survives node re-execution)
+- ✅ backend/tests/conftest.py — relaxed FakeMCP `get_cart`/`update_cart` to make `cart_id` optional (mirrors live create-cart-on-absent)
+- ✅ Updated test_agents_supervisor.py — the Stage-4 "unwired cart route ends cleanly" test became "routes cart through cart node" (cart is now wired)
+- ✅ Full non-DB suite **86 passing offline**; verified end-to-end offline: discovery → product_context → cart add → interrupt summary "Add Classic Black Tee (S / Black) — ₹399.00 × 1 to your cart?" → approve → cart_update (₹1197.00) / deny → "cart unchanged"
+- ⚠️ `pending_action` is surfaced in the **interrupt payload** (`result["__interrupt__"][0].value`), not checkpointed state — a node that interrupts never returns, so it cannot also write state. The denied/approved-complete returns DO write `pending_action: None`. Stage 6 reads the interrupt payload to emit `confirm_request`
+- ⚠️ The cart node's LLM-before-interrupt **runs twice** (LangGraph re-executes the node on resume) — relied on temperature-0 determinism; the only mutation is post-approval
+- ⚠️ 7 `test_db_queries.py` tests error without a live Postgres (environmental — proven identical with Stage-5 changes stashed); all Stage-5 tests pass offline
 
 ### 2026-06-12 — Stage 4: Supervisor + Stylist Agent (MILESTONE A)
 - ✅ backend/agents/state.py — `VastraState(MessagesState)` with session_id, buyer_profile, product_context, cart_id, cart_snapshot, pending_action, route, fallback_used, turn_count; cart fields reserved now so Stage 4 checkpoints stay compatible with Stage 5
@@ -86,6 +102,8 @@
 | B007 | `docker compose up postgres` failed: frontend service had no image/build context | Stage 2 docker-compose.yml | ✅ Fixed | Stage 2 — added image: node:20-alpine to frontend service |
 | B008 | `ImportError: cannot import name 'ClientSession' from 'mcp'` under pytest — local `backend/mcp/` package shadowed the installed `mcp` package because pytest (prepend import mode) put `backend/` on sys.path (no `backend/__init__.py`) | Stage 3 conftest.py / client.py | ✅ Fixed | Stage 3 — added `backend/__init__.py` so the test basedir is the project root, not `backend/`; `from mcp import …` now resolves to the installed package |
 | B009 | Stylist extracted 0 product cards from the LIVE store while offline tests passed. langchain-mcp-adapters tools (`response_format="content_and_artifact"`) return a **list of MCP content blocks** `[{"type":"text","text":"<json>"}]` from `.ainvoke()`, not a plain JSON string like FakeMCP's StructuredTools. `str(list)` produced a Python repr that broke `json.loads`. | Stage 4 stylist.py (live CLI) | ✅ Fixed | Stage 4 — added `_content_to_text()` to flatten content-block lists before sanitise/extract; offline regression test added (`test_live_adapter_content_block_results_are_flattened`) |
+| B010 | Cart node forced `args["cart_id"] = None` for a brand-new cart, sending an explicit null to `update_cart`. The strict FakeMCP `update_cart(cart_id: str)` (and likely the live tool) rejects a null for a required `cart_id`, so a first add failed with a validation error and fell to the honest-failure path (no `cart_update`). | Stage 5 cart.py (integration smoke) | ✅ Fixed | Stage 5 — `_bind_cart_id` injects cart_id only when present and otherwise omits it (live create-cart-on-absent); FakeMCP `get_cart`/`update_cart` relaxed to optional `cart_id` |
+| B011 | (Design note, not a defect) LangGraph re-runs the whole cart node on `Command(resume=...)`, so a call-count-indexed FakeLLM diverges across the resume re-execution. | Stage 5 test_agents_cart.py | ✅ Handled | Stage 5 — cart tests use a **content-based** fake LLM (decides from the message window) that replays identically on the re-run |
 
 ## Assumptions Made
 | Assumption | Stage | Risk Level |
@@ -112,7 +130,12 @@
 | Live store domain is `pmcidd-iv.myshopify.com` (product URLs/CDN images resolve against it) | 4 | Low |
 | `backend` is a regular package (`backend/__init__.py` added) so pytest inserts the project root, not `backend/`, on sys.path | 3 | Low |
 | FallbackChatStreaming only fails over to Gemini before the first chunk is emitted; a mid-stream Groq failure propagates (restart would duplicate output) | 3 | Low |
-| LangGraph interrupt() works with PostgresSaver checkpointer | 0 | Medium — verified in Stage 5 |
+| LangGraph interrupt() works with a checkpointer | 0 | ✅ Verified Stage 5 with MemorySaver (1.0.3); Postgres/Sqlite saver to be wired in Stage 6 |
+| LangGraph 1.0.3: `interrupt(value)` raises `GraphInterrupt`; the value surfaces as `result["__interrupt__"][0].value` from `ainvoke`; resume via `graph.ainvoke(Command(resume=x), config={"configurable":{"thread_id":...}})`. The node **re-executes from the top** on resume (the Nth `interrupt()` call returns the Nth resume value) — so the cart node keeps exactly one interrupt and is deterministic before it (temp 0, sole mutation post-approval) | 5 | Low — live-verified |
+| pending_action cannot be written to checkpointed state at the moment of interrupt (an interrupting node never returns); it rides in the interrupt PAYLOAD. Stage 6 reads `__interrupt__` to emit `confirm_request` and may persist it then | 5 | Low |
+| Cart prices in `get_cart`/`update_cart` JSON are minor units (paise ints) — `unit_price`/`line_price`/`subtotal` normalised to rupee strings via `_to_rupees`. Cart tool shapes are still the Stage 1/3 recordings; `cart_id` relaxed to optional in the fixture (live update_cart creates a cart when absent) | 5 | Medium — cart tool shapes not yet re-recorded from the live store; revisit when the cart flow runs live |
+| `extract_preferences` adds a keyword-only `llm=None` test seam (the documented positional signature is preserved); the merge caps style_tags at 12 and is order-preserving | 5 | Low |
+| `product_context` entries gained `price` + per-variant `{id,title}` (Stage 4 documented `{id,title,url,variant_ids}`); `variant_ids` kept for back-compat. Internal grounding only — the frontend renders cart from `cart_update`, not `product_context` | 5 | Low |
 | Postgres pool: min_size=1, max_size=10 — ample for a single-process demo backend | 2 | Low |
 | Pool open timeout 10s, per-connect/checkout timeout 30s — fail fast on a dead DB | 2 | Low |
 | Pool connections opened with autocommit=True + dict_row — each query self-commits; no manual transaction mgmt in queries.py | 2 | Low |

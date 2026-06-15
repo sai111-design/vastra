@@ -268,14 +268,24 @@ def build_product_cards(tool_results: list[tuple[str, str]]) -> dict:
 
 
 def _product_context_from_cards(cards: dict) -> list[dict]:
-    """Reduce cards to the grounding references kept in graph state."""
+    """Reduce cards to the grounding references kept in graph state.
+
+    Carries ``price`` and per-variant titles in addition to the bare
+    ``variant_ids`` (Stage 4): the Cart agent reads ``product_context`` to
+    restate the exact line — title, variant, and price — when it proposes an
+    ``update_cart``. ``variant_ids`` is preserved unchanged for back-compat.
+    """
 
     return [
         {
             "id": card["id"],
             "title": card["title"],
             "url": card["url"],
+            "price": card.get("price", {}),
             "variant_ids": [v["id"] for v in card["variants"]],
+            "variants": [
+                {"id": v["id"], "title": v.get("title", "")} for v in card["variants"]
+            ],
         }
         for card in cards["products"]
     ]

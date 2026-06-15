@@ -253,11 +253,12 @@ class FakeMCPTools:
         return json.dumps(_PRODUCT_DETAILS_RESULT)
 
     @staticmethod
-    def _get_cart(cart_id: str) -> str:
+    def _get_cart(cart_id: str = "") -> str:
         return json.dumps(_GET_CART_RESULT)
 
     @staticmethod
-    def _update_cart(cart_id: str, add_items: list | None = None) -> str:
+    def _update_cart(cart_id: str = "", add_items: list | None = None) -> str:
+        # cart_id is optional: the live update_cart creates a cart when absent.
         return json.dumps(_UPDATE_CART_RESULT)
 
     @staticmethod

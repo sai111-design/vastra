@@ -30,7 +30,16 @@
 | Prompt context injection | `str.replace("{buyer_profile}", …)` (NOT `str.format`) | Prompts are full of literal JSON braces; `.format` would require escaping them all |
 | Tool budget accounting | Count EXECUTED tool calls; answer over-cap parallel calls with a "budget exhausted" ToolMessage | Enforces the 4-call cap while honouring the provider rule that every tool_call needs a response |
 | MCP result flattening | `_content_to_text()` before sanitise/parse | Adapter tools (`content_and_artifact`) return content-block lists, not strings (Bug B009) |
-| Unwired-route safety | `_route_or_end` maps cart/support/respond → END | A legal Stage-4 classification can't KeyError before Stage 5 wires those nodes |
+| Unwired-route safety | `_route_or_end` maps cart/support/respond → END | A legal Stage-4 classification can't KeyError before Stage 5 wires those nodes (superseded Stage 5: all routes wired, `_route_selector` sends respond/unknown → END) |
+| Cart write-gating | `interrupt(pending)` inside the cart node; resume via `Command(resume={"approved": bool})` | Platform primitive; the pending payload becomes the `confirm_request` SSE event |
+| pending_action surfacing | Lives in the interrupt PAYLOAD, not checkpointed state | A node that interrupts never returns, so it cannot also write state; the caller reads `result["__interrupt__"][0].value` |
+| Cart node determinism | Content-based decisions, temperature 0, single side effect after approval | LangGraph re-executes the whole node on resume (LLM-before-interrupt runs twice) — only the post-approval `update_cart` may mutate |
+| cart_id ownership | Node binds `cart_id` from state (or omits it); model-supplied ids dropped | The model never sees the cart_id; an absent id lets `update_cart` create a cart (live behaviour) |
+| cart_update payload | Built from cart tool JSON only, carried in the final AIMessage `additional_kwargs` | Same grounding contract as Stylist `product_cards` — never render money from model text |
+| product_context enrichment | Added `price` + per-variant `{id,title}` (kept `variant_ids`) | Cart restates the exact line (title/variant/price) from grounded refs, not model text |
+| Extraction output | Prompt-engineered JSON + robust parse (NOT `.with_structured_output()`) | Same rationale as the supervisor; clean empty-delta fallback on any parse failure |
+| Extraction model | `FallbackChat(temperature=0, small=True)` (Llama 3.1 8B) | Right-sized background task; preserves 70B quota; runs AFTER the buyer reply |
+| Support grounding | Hard prompt rule (answer ONLY from tool, never invent); eval-verified | Free-text answers have no structured payload to enforce — the guarantee is the prompt + Stage 8 evals |
 
 ## MCP Endpoint Details (Verified ✓)
 
@@ -218,7 +227,43 @@ Added `FallbackChat.bind_tools(tools)` — binds tool defs to **both** primary a
 MILESTONE A verification tool (dev-only, never deployed): loads live scoped tools, builds the graph (no checkpointer), REPL that prints route/turn/fallback flag, assistant text, the full `product_cards` payload, and `product_context`. Turn-to-turn continuity comes from feeding the result state back as the next input. Sets the Windows selector loop policy + UTF-8 stdout (Bugs B004/B001).
 
 ### Tests (offline)
-`test_agents_supervisor.py` (19) + `test_agents_stylist.py` (14) — both fully offline via `FakeLLM` (now scripts a `responses` sequence, records `calls`, no-op `bind_tools`) and the FakeMCP `StructuredTool`s. Full suite **68/68**.
+`test_agents_supervisor.py` (19) + `test_agents_stylist.py` (14) — both fully offline via `FakeLLM` (now scripts a `responses` sequence, records `calls`, no-op `bind_tools`) and the FakeMCP `StructuredTool`s. Full suite **68/68** (Stage 4).
+
+## Cart, Support & Preference Extractor (Implemented — Stage 5)
+
+Source: `backend/agents/{cart,support,extractor}.py`, updated `graph.py`, `prompts.py`, `stylist.py`, `scripts/cli_chat.py`. `PROMPT_VERSION = "2026-06-15.1"`.
+
+### Cart node (`cart.py`) — the interrupt/confirm safety gate
+`make_cart_node(tools, llm=None)` returns an async bounded ReAct loop over `get_cart`/`update_cart`. The write invariant (rules.md): `update_cart` never runs without an explicit, approved confirmation.
+
+The interrupt flow (verified live against LangGraph 1.0.3):
+1. The model emits an `update_cart` tool call. The node does **not** run it — it builds a `pending` action and calls `interrupt(pending)`. The graph pauses; `graph.ainvoke(...)` returns with `result["__interrupt__"][0].value == pending`.
+2. The caller resumes via `graph.ainvoke(Command(resume={"approved": bool}), config)`. **LangGraph re-executes the whole node from the top** — the LLM-before-interrupt runs a second time — and `interrupt()` now *returns* the resume value instead of pausing. Only on `{"approved": True}` is `update_cart` invoked. On denial (or a malformed resume) the node returns `"No problem — your cart is unchanged."` and `pending_action: None`, with **no** tool call.
+3. Because of the re-execution, everything before the interrupt must be deterministic: the model runs at temperature 0 and the sole durable side effect (the tool call) happens strictly after approval.
+
+`pending` payload (future `confirm_request` event): `{action_id: uuid4().hex[:8], summary, line: {variant_id, quantity, title, price}}`. `summary` restates the exact line, e.g. `"Add Classic Black Tee (S / Black) — ₹399.00 × 1 to your cart?"` — title/variant/price resolved from `product_context` (Stylist-grounded), never model text.
+
+- **Reads** ("show me my cart") call `get_cart`, emit `cart_update`, and never interrupt.
+- **cart_update** payload (`cart_update_from_json`) is built from the tool's JSON only — `{cart_id, checkout_url, currency, subtotal, total_quantity, lines:[{line_id,variant_id,title,quantity,unit_price,line_price}]}` — paise normalised to rupee strings via the Stylist's `_to_rupees`. Carried in the final AIMessage `additional_kwargs` (mirrors `product_cards`). `cart_snapshot` + `cart_id` are also written to state.
+- **cart_id** is bound by `_bind_cart_id`: state's id wins, a model-supplied id is dropped, and an absent id is omitted so `update_cart` creates a cart (the FakeMCP cart tools were relaxed to make `cart_id` optional to mirror this).
+- **Tool errors**: one retry with exponential backoff (`2**attempt`), then an honest failure message — never a pretended success, and `cart_update` is not emitted.
+- Injects `product_context` into `CART_PROMPT` (new `{product_context}` marker) so the model can resolve "the black tee in M" → variant_id (the ids aren't in the message text).
+
+### Support node (`support.py`)
+`make_support_node(tools, llm=None)` — bounded ReAct loop over the single tool `search_shop_policies_and_faqs`. Calls the tool with the buyer's question, then composes an answer citing the policy section. Empty results → an honest "no published policy" reply. The "never invent policy" guarantee is a hard prompt rule (SUPPORT_PROMPT) tested in the Stage 8 evals; offline tests pin the plumbing (tool called with the question, policy text reaches the model, empty result surfaced, prompt carries the rule, out-of-scope tool refused).
+
+### Preference Extractor (`extractor.py`)
+- `extract_preferences(last_user_msg, last_assistant_msg, *, llm=None) -> dict` — runs on `FallbackChat(temperature=0, small=True)` (8B). Prompts for the full schema `{"sizes":{}, "budget_min":null, "budget_max":null, "style_tags":[], "last_category":null}`, parses robustly (`_parse_extraction`: fences/prose/garbage tolerant, budgets coerced to int, sizes/tags type-checked), and returns a **delta** of only the non-empty stated fields (`_delta`). Never raises — any model error yields `{}`. Designed to run AFTER the buyer reply (sync in the CLI, background task in Stage 6).
+- `merge_profile(existing, delta) -> dict` — sizes merged key-by-key (delta wins), budget/last_category overwritten when present, `style_tags` unioned order-preserving + de-duplicated and capped at `MAX_STYLE_TAGS = 12`. Returns a fresh dict for upserting into `buyer_profiles`.
+
+### Graph (`graph.py`)
+`build_graph(tools_by_agent, checkpointer=None, *, stylist_llm=None, cart_llm=None, support_llm=None)`: nodes supervisor + stylist + cart + support; `START→supervisor`; conditional edges via `_route_selector` (`stylist`/`cart`/`support` → their nodes, `respond`/unknown → `END`); each specialist → `END`. A checkpointer is **required** for the cart interrupt/resume cycle (MemorySaver in CLI/tests; Postgres/Sqlite saver in Stage 6).
+
+### CLI (`scripts/cli_chat.py`)
+Now builds the graph with a `MemorySaver` and a `thread_id` config. `_drive_turn` invokes the graph and, while `result["__interrupt__"]` is present, prints the pending action, prompts `approve? [y/N]`, and resumes with `Command(resume={"approved": ...})`. Each turn injects the accumulated `buyer_profile`, prints route/reply/`product_cards`/`cart_update`/`product_context`, then runs the extractor synchronously and prints the merged `buyer_profile` so it can be watched accumulating. Continuity comes from the checkpointer (only the new message + profile are passed each turn).
+
+### Tests (offline)
+`test_agents_cart.py` (8: interrupt-proposes / summary-restates-line / approved-calls-update_cart / denied-no-mutation / show-cart-no-interrupt via a compiled graph + MemorySaver + a content-based fake LLM that survives node re-execution, plus pure-helper tests), `test_agents_support.py` (4: policy-matched / empty-says-no-policy / does-not-invent + prompt-rule assertion / refuses-out-of-scope-tool), `test_agents_extractor.py` (11: size/budget/category deltas, empty delta, fences, malformed→empty, never-raises, merge sizes+budget/union+dedup/12-cap/empty-existing). Plus 1 new support graph smoke in `test_agents_supervisor.py`. **24 new tests; full non-DB suite 86 passing offline** (the 7 `test_db_queries.py` errors require a live Postgres and are environmental — confirmed identical on the clean tree).
 
 ## Component Map (Planned)
 

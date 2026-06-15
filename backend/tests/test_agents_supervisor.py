@@ -164,13 +164,33 @@ async def test_graph_respond_ends_without_specialist(monkeypatch, fake_scoped_to
     assert [m.type for m in out["messages"]] == ["human"]
 
 
-async def test_graph_unwired_route_ends_cleanly(monkeypatch, fake_scoped_tools):
-    # "cart" is a legal classification with no node until Stage 5 — the graph
-    # must end the turn, not raise.
+async def test_graph_routes_cart_through_cart_node(monkeypatch, fake_scoped_tools):
+    # "cart" now dispatches to the Cart node (Stage 5). A read-only / no-tool
+    # turn never interrupts, so no checkpointer is needed here.
     _patch_llm(monkeypatch, FakeLLM(response='{"route": "cart"}'))
-    graph = build_graph(fake_scoped_tools, stylist_llm=FakeLLM())
+    graph = build_graph(
+        fake_scoped_tools, cart_llm=FakeLLM(response="Your cart is currently empty.")
+    )
 
-    out = await graph.ainvoke({"messages": [HumanMessage(content="Add that to my cart")]})
+    out = await graph.ainvoke({"messages": [HumanMessage(content="what's in my cart?")]})
 
     assert out["route"] == "cart"
-    assert [m.type for m in out["messages"]] == ["human"]
+    final = out["messages"][-1]
+    assert final.type == "ai"
+    assert final.content == "Your cart is currently empty."
+
+
+async def test_graph_routes_support_through_support_node(monkeypatch, fake_scoped_tools):
+    # "support" dispatches to the Support node (Stage 5).
+    _patch_llm(monkeypatch, FakeLLM(response='{"route": "support"}'))
+    graph = build_graph(
+        fake_scoped_tools,
+        support_llm=FakeLLM(response="Per our Returns & Exchanges policy, you have 7 days."),
+    )
+
+    out = await graph.ainvoke({"messages": [HumanMessage(content="what's your return policy?")]})
+
+    assert out["route"] == "support"
+    final = out["messages"][-1]
+    assert final.type == "ai"
+    assert "Returns & Exchanges" in final.content
