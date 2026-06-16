@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import asynccontextmanager
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk
@@ -359,3 +360,125 @@ def fake_llm() -> FakeLLM:
     """Provide a canned-response LLM that never calls a real provider."""
 
     return FakeLLM()
+
+
+# ---------------------------------------------------------------------------
+# API test harness (Stage 6) — offline FastAPI app over SQLite + FakeMCP
+# ---------------------------------------------------------------------------
+def parse_sse(text: str) -> list[dict]:
+    """Parse a raw ``text/event-stream`` body into a list of {event, data} dicts.
+
+    Tolerant of sse-starlette's ``\\r\\n`` framing and keep-alive comment lines
+    (``: ping``). ``data`` is returned as the raw string; callers ``json.loads``
+    it for the payload.
+    """
+
+    events: list[dict] = []
+    for block in text.replace("\r\n", "\n").split("\n\n"):
+        block = block.strip("\n")
+        if not block.strip():
+            continue
+        event = "message"
+        data_lines: list[str] = []
+        saw_field = False
+        for line in block.split("\n"):
+            if line.startswith(":"):  # comment / keep-alive ping
+                continue
+            if line.startswith("event:"):
+                event = line[len("event:") :].strip()
+                saw_field = True
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].lstrip())
+                saw_field = True
+        if not saw_field:
+            continue
+        events.append({"event": event, "data": "\n".join(data_lines)})
+    return events
+
+
+@pytest.fixture
+def sqlite_env(tmp_path, monkeypatch):
+    """Point the whole config/DB layer at a throwaway SQLite file, offline.
+
+    Switches ``DB_BACKEND=sqlite`` with a temp path, clears the cached settings
+    singleton, and resets the connection-module globals so a fresh connection is
+    opened against the test database. Restored on teardown.
+    """
+
+    import backend.db.connection as connection
+    from backend.config import get_settings
+
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "vastra_test.db"))
+    monkeypatch.setenv("SHOPIFY_STORE_DOMAIN", "fake-store.myshopify.com")
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("CORS_ORIGIN", "http://localhost:5173")
+
+    get_settings.cache_clear()
+    connection._pool = None
+    connection._sqlite_conn = None
+    yield
+    get_settings.cache_clear()
+    connection._pool = None
+    connection._sqlite_conn = None
+
+
+@pytest.fixture
+def make_api_client(sqlite_env, fake_scoped_tools, monkeypatch):
+    """Factory: build an offline FastAPI app + httpx client over the test graph.
+
+    httpx's ASGITransport does NOT run lifespan events, so the production MCP
+    load / checkpointer setup never fires — we wire ``app.state`` directly with
+    the FakeMCP-scoped tools, a MemorySaver-backed graph, and offline LLM seams.
+    The Preference Extractor is patched to a no-op by default (a test that asserts
+    on memory overrides it). Background extraction tasks are drained on teardown.
+    """
+
+    import backend.agents.supervisor as supervisor_module
+    import backend.api.routes_chat as routes_chat
+    from httpx import ASGITransport, AsyncClient
+
+    async def _noop_extract(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(routes_chat, "extract_preferences", _noop_extract)
+
+    @asynccontextmanager
+    async def _factory(
+        *, supervisor_llm=None, stylist_llm=None, cart_llm=None, support_llm=None
+    ):
+        from langgraph.checkpoint.memory import MemorySaver
+
+        from backend.agents.graph import build_graph
+        from backend.config import get_settings
+        from backend.db.connection import close_db, init_db
+        from backend.main import create_app
+
+        if supervisor_llm is not None:
+            monkeypatch.setattr(supervisor_module, "_get_llm", lambda: supervisor_llm)
+
+        await init_db()
+        app = create_app()
+        app.state.settings = get_settings()
+        app.state.tools_by_agent = fake_scoped_tools
+        app.state.graph = build_graph(
+            fake_scoped_tools,
+            MemorySaver(),
+            stylist_llm=stylist_llm,
+            cart_llm=cart_llm,
+            support_llm=support_llm,
+        )
+        app.state.bg_tasks = set()
+
+        client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        try:
+            yield client, app
+        finally:
+            pending = list(app.state.bg_tasks)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await client.aclose()
+            await close_db()
+
+    return _factory

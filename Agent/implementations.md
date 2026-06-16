@@ -40,6 +40,12 @@
 | Extraction output | Prompt-engineered JSON + robust parse (NOT `.with_structured_output()`) | Same rationale as the supervisor; clean empty-delta fallback on any parse failure |
 | Extraction model | `FallbackChat(temperature=0, small=True)` (Llama 3.1 8B) | Right-sized background task; preserves 70B quota; runs AFTER the buyer reply |
 | Support grounding | Hard prompt rule (answer ONLY from tool, never invent); eval-verified | Free-text answers have no structured payload to enforce — the guarantee is the prompt + Stage 8 evals |
+| Token streaming source | Replay the grounded final `AIMessage` (word-chunked), not raw `on_chat_model_stream` | Nodes use `ainvoke` (no model-stream events fire); raw streaming would also leak supervisor route JSON + intermediate ReAct text. Real chunks pass through when present (B012) |
+| Structured event source | `additional_kwargs` of the specialist's final message (via `astream_events` `on_chain_end` output), never text | Same grounding contract as the agents; the API is a pass-through, not a re-parser |
+| Interrupt → `confirm_request` | Read `aget_state().interrupts[0].value` AFTER the event loop; emit and hold (no `done`) | An `interrupt()` does not appear as a stream event (B013); `/api/confirm` validates `action_id` against the same snapshot before `Command(resume=...)` |
+| Checkpointer (Stage 6) | `AsyncPostgresSaver`/`AsyncSqliteSaver.from_conn_string`, async CM nested around the lifespan `yield`; `await setup()` once | Async savers match the async stack; the CM keeps the connection alive for the app's life |
+| Background extraction | `asyncio.create_task` tracked in `app.state.bg_tasks`, run after the streamed reply; `done` does not wait | Honest "background task" that never delays tokens; the tracking set lets tests `await` the upsert deterministically |
+| Offline API tests | Wire `app.state` directly + `MemorySaver` (ASGITransport skips lifespan) | No network; the production AsyncPg/Sqlite savers are exercised via the real lifespan / curl (Milestone B) |
 
 ## MCP Endpoint Details (Verified ✓)
 
@@ -264,6 +270,55 @@ Now builds the graph with a `MemorySaver` and a `thread_id` config. `_drive_turn
 
 ### Tests (offline)
 `test_agents_cart.py` (8: interrupt-proposes / summary-restates-line / approved-calls-update_cart / denied-no-mutation / show-cart-no-interrupt via a compiled graph + MemorySaver + a content-based fake LLM that survives node re-execution, plus pure-helper tests), `test_agents_support.py` (4: policy-matched / empty-says-no-policy / does-not-invent + prompt-rule assertion / refuses-out-of-scope-tool), `test_agents_extractor.py` (11: size/budget/category deltas, empty delta, fences, malformed→empty, never-raises, merge sizes+budget/union+dedup/12-cap/empty-existing). Plus 1 new support graph smoke in `test_agents_supervisor.py`. **24 new tests; full non-DB suite 86 passing offline** (the 7 `test_db_queries.py` errors require a live Postgres and are environmental — confirmed identical on the clean tree).
+
+## FastAPI Streaming API (Implemented — Stage 6, MILESTONE B)
+
+Source: `backend/main.py`, `backend/hf_main.py`, `backend/streaming/sse.py`, `backend/api/{routes_sessions,routes_chat,routes_health}.py`, updated `backend/tests/conftest.py`, `backend/tests/test_api_{sessions,chat,confirm,health}.py`.
+
+### App factory & lifespan (`main.py`)
+- `create_app(lifespan=lifespan)` builds the app (CORS from `settings.cors_origin`, includes the three routers), then `app = create_app()` is exported for `uvicorn backend.main:app`.
+- **Lifespan startup** (exact order): `get_settings()` → `await init_db()` (idempotent schema) → `tools_by_agent = await load_scoped_tools(domain)` → open the checkpointer → `await checkpointer.setup()` (creates LangGraph checkpoint tables) → `app.state.{settings, tools_by_agent, graph, bg_tasks}` set → `yield` → `await close_db()`.
+- **Checkpointer:** `_make_checkpointer(settings)` returns `AsyncPostgresSaver.from_conn_string(database_url)` or `AsyncSqliteSaver.from_conn_string(sqlite_path)` (imports `langgraph.checkpoint.{postgres,sqlite}.aio`). It is an **async context manager nested around the lifespan `yield`**, so the connection lives exactly as long as the app.
+- Forces `WindowsSelectorEventLoopPolicy` at import (Bug B004) — async psycopg AND the AsyncPostgresSaver need it on Windows; no-op on Linux/Docker.
+
+### HF Spaces entrypoint (`hf_main.py`)
+Reuses `create_app()` and, if `frontend/dist` exists, mounts it at `/` with `StaticFiles(directory=..., html=True)` (SPA catch-all). The mount is added **after** the `/api` routers so explicit API routes win; guarded so it serves API-only until Stage 7 builds the SPA. Single port (`uvicorn backend.hf_main:app --port 8000`).
+
+### SSE serialisation (`streaming/sse.py`)
+- `sse_event(type, data) -> str` — the canonical wire format `f"event: {type}\ndata: {json.dumps(data)}\n\n"` (the contract the frontend/tests assert).
+- `sse(type, data) -> ServerSentEvent` — what the endpoint generators actually yield into `EventSourceResponse` (sse-starlette owns the byte framing + keep-alive pings).
+- `event_response(gen) -> EventSourceResponse(gen, ping=3600)` — large ping so a short turn's events are never split by a `: ping` comment.
+
+### Exact SSE event shapes emitted
+| Event | Payload | When |
+|-------|---------|------|
+| `route` | `{"agent": "stylist"\|"cart"\|"support"\|"respond"}` | supervisor `on_chain_end` |
+| `token` | `{"text": "<word-chunk>"}` | replayed from the final `AIMessage` content (word-by-word) — see filtering logic |
+| `product_cards` | `{"products": [{id, title, url, image_url, price:{amount,currency}, variants:[{id,title,available}]}]}` | from the stylist final message's `additional_kwargs.product_cards` |
+| `cart_update` | `{cart_id, checkout_url, currency, subtotal, total_quantity, lines:[{line_id,variant_id,title,quantity,unit_price,line_price}]}` (rupee strings) | from the cart final message's `additional_kwargs.cart_update` |
+| `confirm_request` | `{action_id, summary, line:{variant_id,quantity,title,price}}` | the interrupt payload (`aget_state().interrupts[0].value`) when the graph paused |
+| `done` | `{turn_id: int\|null, fallback_used: bool}` | after the turn completes (NOT emitted when paused on a confirm) |
+
+### `astream_events` filtering logic (`_stream_graph` in `routes_chat.py`)
+Single pass over `graph.astream_events(input, config, version="v2")`:
+- `on_chat_model_stream` with `metadata.langgraph_node ∈ {stylist,cart,support}` → emit `token` from the chunk (and mark the node "streamed").
+- `on_chain_end`:
+  - `name == "supervisor"` → emit `route` from `data.output["route"]`.
+  - `name ∈ specialists` → read `data.output`: OR in `fallback_used`; take `messages[-1]`; if the node did **not** stream, replay its content as `token` events; then emit `product_cards` / `cart_update` from `additional_kwargs`.
+- After the loop: `pending = aget_state().interrupts[0].value` if any → emit `confirm_request` and stop (turn paused). Otherwise persist the assistant message (+ `events_json` of the structured events for replay), update session cart/activity, schedule extraction, emit `done`.
+
+`/api/confirm` resumes with `Command(resume={"approved": bool})` and reuses the same `_stream_graph` (cart node re-executes → `cart_update` + `token`), then persists + `done`.
+
+### Endpoints
+- POST `/api/sessions` → `{session_id}` (uuid4 hex = thread_id); GET `/api/sessions` → `{sessions:[{session_id, preview, ...}]}`; GET `/api/sessions/{id}` → `{session_id, cart_id, messages:[{id,role,content,events,created_at}]}` (404 if unknown; `events` = decoded `events_json`).
+- POST `/api/chat` `{session_id, message}` → SSE (404 unknown session, 400 message >1000 chars).
+- POST `/api/confirm` `{session_id, action_id, approved}` → SSE (404 unknown session, 409 if no pending interrupt or `action_id` mismatch).
+- GET `/api/health` → `{db:"ok"|"down", mcp:"ok"|"down", model:"groq"|"gemini"}`.
+
+### Test harness additions (`conftest.py`)
+- `parse_sse(text)` — tolerant SSE parser (`\r\n`, `: ping` comments).
+- `sqlite_env` — switches config to a throwaway SQLite file, clears the `get_settings` cache, resets `connection` globals (restored on teardown).
+- `make_api_client(*, supervisor_llm, stylist_llm, cart_llm, support_llm)` — builds the app over FakeMCP-scoped tools + a `MemorySaver` graph with offline LLM seams; **wires `app.state` directly** (httpx `ASGITransport` skips lifespan); patches `extract_preferences` to a no-op by default; drains `bg_tasks` on teardown. 19 offline tests.
 
 ## Component Map (Planned)
 
