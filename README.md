@@ -20,27 +20,27 @@ This repository demonstrates advanced agentic commerce patterns: **Supervisor ro
 graph TD
     User((User)) -->|Chat Message| UI[React Frontend]
     UI -->|SSE Stream| API[FastAPI Backend]
-    
+
     API --> Supervisor[Supervisor Agent]
-    
-    subgraph LangGraph Orchestration
+
+    subgraph LGO [LangGraph Orchestration]
         Supervisor -->|Route: Discovery| Stylist[Stylist Agent]
         Supervisor -->|Route: Policy| Support[Support Agent]
         Supervisor -->|Route: Cart| Cart[Cart Agent]
-        Supervisor -->|Route: General| Chat[Respond/Fallback]
+        Supervisor -->|Route: General| Chat[Respond / Fallback]
     end
-    
-    Stylist -->|Search/Details| MCP[Shopify Storefront MCP]
+
+    Stylist -->|Search / Details| MCP[Shopify Storefront MCP]
     Support -->|Policy Search| MCP
     Cart -->|Cart CRUD| MCP
-    
+
     Cart -.->|LangGraph Interrupt| Confirm[User Confirmation Gate]
     Confirm -->|Approve| WriteCart[(Update Cart)]
     Confirm -->|Deny| CancelCart[Skip Update]
-    
+
     API -.->|Async| Extractor[Preference Extractor]
     Extractor --> DB[(PostgreSQL / SQLite)]
-    LangGraph Orchestration -->|Thread Checkpoints| DB
+    Supervisor -.->|Thread Checkpoints| DB
 ```
 
 ## Evaluation Results
