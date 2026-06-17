@@ -11,14 +11,30 @@ services:
       POSTGRES_DB: vastra
       POSTGRES_USER: vastra
       POSTGRES_PASSWORD: vastra
-  
+    # Backend must not start querying until Postgres is accepting connections —
+    # without this the first few requests race the DB startup and crash.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vastra -d vastra"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
   backend:
     build: .
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     env_file: .env
+    environment:
+      # Override the .env's host-side DATABASE_URL (which points at
+      # 127.0.0.1:55432 for native Windows uvicorn). Inside docker-compose,
+      # Postgres is reachable as the service name `postgres` on its
+      # internal port 5432.
+      DATABASE_URL: postgresql://vastra:vastra@postgres:5432/vastra
+      # CORS for the vite dev server running in the sibling `frontend` container.
+      CORS_ORIGIN: http://localhost:5173
     volumes:
       - .:/app
   
