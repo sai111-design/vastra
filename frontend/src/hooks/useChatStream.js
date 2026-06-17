@@ -16,7 +16,10 @@ function enrichMessage(msg) {
   };
   if (msg.events && Array.isArray(msg.events)) {
     for (const evt of msg.events) {
-      switch (evt.type) {
+      // Stored events use {event, data}; live SSE events use {type, data}.
+      // Read either so this function works for both code paths.
+      const kind = evt.event || evt.type;
+      switch (kind) {
         case 'route': rich.route = evt.data?.agent; break;
         case 'product_cards': rich.productCards = evt.data?.products; break;
         case 'confirm_request': rich.confirmRequest = evt.data; break;
