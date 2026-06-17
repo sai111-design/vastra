@@ -28,13 +28,17 @@ logger = logging.getLogger(__name__)
 
 app = create_app()
 
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
-if _FRONTEND_DIST.is_dir():
-    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIST), html=True), name="spa")
-    logger.info("Mounted SPA from %s", _FRONTEND_DIST)
+_MOUNT_DIR = _STATIC_DIR if _STATIC_DIR.is_dir() else _FRONTEND_DIST
+
+if _MOUNT_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(_MOUNT_DIR), html=True), name="spa")
+    logger.info("Mounted SPA from %s", _MOUNT_DIR)
 else:
     logger.warning(
-        "Frontend build not found at %s — serving API only (Stage 7 builds the SPA)",
+        "Frontend build not found at %s or %s — serving API only (Stage 7 builds the SPA)",
+        _STATIC_DIR,
         _FRONTEND_DIST,
     )

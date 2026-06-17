@@ -14,7 +14,19 @@
 | Prompt injection boundary | Tool output wrapped in &lt;tool_data&gt; delimiters | MCP results are untrusted input |
 | Cart safety | LangGraph interrupt() + Command(resume=) | Write-gating via platform primitive |
 | Frontend | React 18 + Vite, plain JS, hand-written CSS | Portfolio convention — no UI libraries |
+| SSE parsing | fetch + ReadableStream + TextDecoder async generator (NOT EventSource) | EventSource is GET-only; need POST for /api/chat and /api/confirm |
+| State management | Single `useChatStream` hook with local accumulator pattern | No external state library; accumulator survives cart interrupt (stream ends without `done`) |
+| View switching | `data-view` attribute + CSS media queries (NOT react-router) | Portfolio constraint; two views (sessions/chat) don't warrant a router |
+| Cart interrupt UX | Stream `finally` block finalises accumulated message if no `done` received | The backend sends `confirm_request` then ENDS the stream; UI must show the chip from the partial message |
+| Mobile layout | CSS media query at 768px; cart = bottom sheet; sidebar → full-screen session list | Single breakpoint covers phone/tablet/desktop; bottom sheet is native-feeling on mobile |
 | Deployment | HF Spaces Docker SDK, SqliteSaver on /data | Free tier, persistent volume |
+| Eval harness engine | YAML-driven, graph-level, fully offline (FakeMCP + scripted FakeLLM) | Deterministic CI, zero API cost, tests the pipeline not the LLM |
+| Eval assertion types | Route, tool sequence, grounding (prices/URLs), write-gating, adversarial (must_not_contain/call/max_tool_calls) | Covers routing correctness, tool orchestration, hallucination boundary, safety |
+| Eval FakeLLM strategy | `EvalFakeLLM` (scripted sequence) for supervisor/stylist/support; `EvalCartLLM` (content-based) for cart turns | Cart re-execution needs deterministic replay; content-based LLM survives node re-runs |
+| Adversarial fixtures | `AdversarialFakeMCPTools` injects payloads into search/policy tool results | Same injection strings as `seed_injections.py` — CI and live-store test identical boundary |
+| Eval tool recording | `RecordingMCPTools` spy wrappers capture name+args+result per call | Enables tool sequence, grounding, and write-gating assertions without modifying agent code |
+| Grounding assertion scope | Checks prices (₹NNN) and URLs against tool results; does NOT check product names | Name matching is fuzzy (abbreviations, partials) — strict matching would cause brittle false positives |
+| Eval pass thresholds | Golden ≥90%, Adversarial 100% | Safety failures have zero tolerance; golden allows for known agent quirks logged in progress.md |
 | MCP verification approach | Raw httpx JSON-RPC (no MCP library) | De-risk spike before committing to langchain-mcp-adapters |
 | Catalog seeding | Shopify product CSV import format | Standard import path; 75 variants across 26 products covering 8 categories |
 | Catalog tool name | `search_catalog` (not `search_shop_catalog`) | PRD assumed `search_shop_catalog` but actual Shopify MCP exposes `search_catalog` — all agent code must use the real name |
@@ -80,7 +92,7 @@ The verify script handles two possible response formats:
 1. Standard JSON-RPC response body
 2. SSE-style or newline-delimited JSON (fallback parsing)
 
-## API Endpoints (Planned)
+## API Endpoints (Implemented — Stage 6)
 
 | Method | Route | Purpose |
 |--------|-------|---------|
@@ -91,7 +103,7 @@ The verify script handles two possible response formats:
 | POST | /api/confirm | Resolve pending cart action (SSE continuation) |
 | GET | /api/health | Liveness: DB + MCP + model status |
 
-## SSE Event Types (Planned)
+## SSE Event Types (Implemented — Stage 6, consumed by Stage 7 frontend)
 
 | Event | Payload | Consumer |
 |-------|---------|----------|
@@ -320,17 +332,91 @@ Single pass over `graph.astream_events(input, config, version="v2")`:
 - `sqlite_env` — switches config to a throwaway SQLite file, clears the `get_settings` cache, resets `connection` globals (restored on teardown).
 - `make_api_client(*, supervisor_llm, stylist_llm, cart_llm, support_llm)` — builds the app over FakeMCP-scoped tools + a `MemorySaver` graph with offline LLM seams; **wires `app.state` directly** (httpx `ASGITransport` skips lifespan); patches `extract_preferences` to a no-op by default; drains `bg_tasks` on teardown. 19 offline tests.
 
-## Component Map (Planned)
+## React Frontend (Implemented — Stage 7, MILESTONE C)
 
-| Component | Responsibility |
-|-----------|---------------|
-| ChatView | Session composition root; owns turn state |
-| MessageList / Composer | Bubbles + input |
-| ProductCardRow / ProductCard | Renders ONLY from product_cards event payload |
-| ConfirmChip | Confirm/Cancel → POST /api/confirm |
-| CartDrawer | Slide-over from cart_update events |
-| CheckoutBanner | Shopify checkout link handoff |
-| SessionList | History via GET /api/sessions |
+Source: `frontend/src/` — React 18 + Vite, plain JS (JSX), hand-written CSS in `index.css`. No TypeScript, no react-router, no component libraries, no Tailwind.
+
+### Design System (`index.css`)
+Tokens: `--green:#8FB83A`, `--cream:#F5F0EB`, `--ink:#1A1A1A`, `--body:#4A4A4A`, `--orange:#E85D3A`, `--pink:#F0A0C0`, `--yellow:#F2D03B`, `--dkgreen:#2D6B4F`, `--disabled:#C5C5C5`. Font: Work Sans 400–800 via Google Fonts. Breakpoint: 768px (desktop/mobile). Animations: thinking-dot (staggered bounce), loading-bar (indeterminate slide), slide-right (cart drawer desktop), slide-up (cart drawer mobile), fade-in (messages), spin (button spinner).
+
+### SSE Client (`api/client.js`)
+- `parseSSE(response)` — async generator over `response.body.getReader()` + `TextDecoder({ stream: true })`. Buffers partial chunks, splits on `\n\n`, extracts `event:` type + `data:` JSON. Yields `{type, data}` objects. Handles multi-line data fields.
+- `ssePost(url, body, onEvent)` — POST fetch with `Content-Type: application/json`, iterates `parseSSE`, calls `onEvent({type, data})` for each event.
+- REST: `createSession()` → POST `/api/sessions`, `listSessions()` → GET `/api/sessions`, `getSession(id)` → GET `/api/sessions/{id}`, `checkHealth()` → GET `/api/health`.
+- SSE: `streamChat(sessionId, message, onEvent)` → POST `/api/chat`, `confirmAction(sessionId, actionId, approved, onEvent)` → POST `/api/confirm`.
+
+### State Hook (`hooks/useChatStream.js`)
+
+Central hook managing all app state. Key patterns:
+
+**Local accumulator:** `sendMessage` and `handleConfirm` create a local `acc` object tracking `{text, route, cards, confirm, cartUpd, err, fallback, gotDone}`. Each SSE event mutates `acc` and calls `updateStream()` to refresh `streamingMessage`. On `done`, the accumulated message is finalized into `messages`. On stream end without `done` (cart interrupt), the `finally` block checks `acc.gotDone` and finalizes if false — this is how the UI gets the confirm chip even though the stream ended abruptly.
+
+**Session override:** `sendMessage(text, sessionIdOverride)` accepts an optional session ID for the create-then-send flow. React's async state batching means `createSession()` sets `currentSessionId` via setState but `sendMessage` reads the stale closure value — the override bypasses this.
+
+**History reconstruction:** `enrichMessage(msg)` maps stored `events` array back to rich message fields (route, productCards, confirmRequest, cartUpdate, error, fallbackUsed). `resolveConfirms(messages)` scans the message sequence: a confirm_request followed by a message with cartUpdate → `confirmed`; followed by any other message → `cancelled`; nothing after → still pending.
+
+| State | Type | Purpose |
+|-------|------|---------|
+| `appReady` | bool | False during initial session list fetch; loading screen shown |
+| `sessions` | array | Session list for sidebar/mobile list |
+| `currentSessionId` | string\|null | Active session; null = sessions view on mobile |
+| `messages` | array | Rich message objects for the active session |
+| `streamingMessage` | object\|null | In-flight assistant message during SSE stream |
+| `cart` | object\|null | Latest cart state from any cart_update event |
+| `pendingConfirm` | object\|null | Active confirm_request awaiting user action |
+| `isStreaming` | bool | True while an SSE stream is open |
+| `route` | string\|null | Current agent route from last route event |
+| `error` | string\|null | Last error message |
+| `cartOpen` | bool | Cart drawer visibility |
+
+### Component Map (Implemented)
+
+| Component | File | Props | Responsibility |
+|-----------|------|-------|---------------|
+| `App` | `App.jsx` | — | Root; view switching via `data-view` attr; owns sidebar, mobile sessions, chat area; inline `renderMessage()` emits bubble + structured components per message |
+| `Composer` | `components/Composer.jsx` | `onSend: fn`, `disabled: bool`, `locked: bool` | Auto-resizing textarea; Enter=send, Shift+Enter=newline; locked state shows "Confirm or cancel above" message; disabled during streaming |
+| `ProductCard` | `components/ProductCard.jsx` | `product: {title, image_url, price, url, variants}` | Single product card; image, title, price, variant chips (available/sold-out); click opens product URL in new tab |
+| `ProductCardRow` | `components/ProductCardRow.jsx` | `products: array` | Horizontal scrollable row of ProductCards; renders ONLY from `product_cards` SSE event payload |
+| `ConfirmChip` | `components/ConfirmChip.jsx` | `request: object`, `resolved?: string`, `onConfirm?: fn` | Pending: Confirm/Cancel buttons + spinner; resolved: checkmark/X + status text; `onConfirm(approved)` calls `confirmAction` |
+| `CartDrawer` | `components/CartDrawer.jsx` | `cart: object`, `open: bool`, `onClose: fn` | Overlay + slide-over drawer; line items, subtotal, checkout CTA; desktop: 340px right panel; mobile: bottom sheet 85vh; renders ONLY from `cart_update` SSE events |
+| `CheckoutBanner` | `components/CheckoutBanner.jsx` | `cart: {checkout_url, total_quantity, subtotal}` | Green banner inline after cart_update messages; item count, subtotal, Shopify checkout link |
+| `ThinkingDots` | `components/ThinkingDots.jsx` | — | Three green dots with staggered bounce animation; shown while streaming before content arrives |
+| `ErrorBubble` | `components/ErrorBubble.jsx` | `message: string`, `recoverable?: bool` | Orange-bordered error; optional "Retry" button when recoverable |
+
+### Layout Strategy
+- **Desktop (>768px):** `display:flex` — `.sidebar` (260px fixed) + `.chat-main` (flex:1). Sidebar always visible. Cart drawer slides in from right over chat area.
+- **Mobile (≤768px):** Sidebar hidden. `data-view="sessions"` shows `.mobile-sessions` (full-screen list with avatars + FAB); `data-view="chat"` shows `.chat-main` with back button. Cart drawer is a bottom sheet (border-radius 24px top, max-height 85vh). View toggling driven by `currentSessionId` state (null → sessions, non-null → chat).
+- **Message bubbles:** User = ink background, cream text, radius 18/18/4/18. Assistant = cream background, ink text, radius 18/18/18/4. Max-width clamped (user 65%/mobile 78%, assistant 75%/mobile 85%).
+
+## Evaluation Harness (Implemented — Stage 8)
+
+Source: `backend/tests/evals/runner.py`, `backend/tests/evals/golden/`, `backend/tests/evals/adversarial/`.
+
+### Engine (`runner.py`)
+- YAML-driven eval engine that parses conversational sequences and assertions.
+- Loads test cases from `golden/` and `adversarial/` directories.
+- Uses `RecordingMCPTools` spy wrappers to capture tool sequence and arguments.
+- Uses scripted `EvalFakeLLM` for deterministic replay of supervisor, stylist, and support turns.
+- Uses content-based `EvalCartLLM` for cart turns (survives LangGraph node re-execution).
+
+### Assertions
+- **route**: Asserts the supervisor classifies the intent correctly.
+- **tool_sequence**: Asserts tools are called in the exact expected order with expected args.
+- **grounding**: Asserts the final assistant message does not contain invented prices (₹NNN) or URLs not present in tool results.
+- **write_gating**: Asserts `update_cart` is never called without a preceding approved `interrupt()`.
+- **adversarial**: `must_not_contain`, `must_not_call`, `max_tool_calls` to ensure prompt injection and boundary testing.
+
+### Injections (`seed_injections.py`)
+- Shopify Admin GraphQL tool to seed injection payloads into product descriptions and policy texts.
+
+## Final Polish & Deployment (Implemented — Stage 9)
+
+- **Backend & Testing**: Added `test_sanitize.py` and `test_config.py`. Enforced code quality via `ruff check`. Evaluated the full suite successfully (121 core tests + 42 eval tests).
+- **Frontend Testing**: Integrated `vitest` and `@testing-library/react`. Added basic `App.test.jsx` smoke tests to verify component rendering states.
+- **CI/CD & Docker**: Created a production-ready `Dockerfile` mapping `frontend/dist` directly onto the backend. Built a `.github/workflows/ci.yml` pipeline with 4 discrete jobs: `backend`, `frontend`, `evals`, `mcp-contract`.
+- **Documentation**: Added portfolio-ready `README.md` with `mermaid` architecture diagram, eval results, and HF Spaces frontmatter. Provided `demo_script.md` for a 2-minute feature walkthrough.
+- Assured build transparency constraints (no ORM, no component libraries, provider agnostic).
+- Project is 100% complete.
 
 ## Seed Catalog Summary
 
