@@ -6,6 +6,17 @@ COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 
 COPY frontend/ ./
+
+# Guard against Git-LFS pointer files leaking into the build context.
+# If someone runs `docker build` without first running `git lfs pull`,
+# the assets are 131-byte text pointers, not real binaries — silent in
+# `npm run build` but a broken logo at runtime. Fail fast here instead.
+RUN if head -c 50 public/assets/vastra-mark-v2.png | grep -q "git-lfs"; then \
+      echo "ERROR: public/assets/vastra-mark-v2.png is a Git-LFS pointer." >&2; \
+      echo "Run 'git lfs install && git lfs pull' on the host before docker build." >&2; \
+      exit 1; \
+    fi
+
 RUN npm run build
 
 # Stage 2: Backend runtime

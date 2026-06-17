@@ -70,7 +70,15 @@ This project adheres to strict architectural rules to demonstrate low-level mast
 - Python 3.11+
 - Node.js 20+
 - Docker (for PostgreSQL)
+- [Git LFS](https://git-lfs.com/) — the logo and intro video are LFS-tracked
 - API Keys: `GROQ_API_KEY`, `GEMINI_API_KEY` (optional fallback)
+
+### 0. After cloning — pull the LFS-tracked assets
+```bash
+git lfs install
+git lfs pull
+```
+Without this, `frontend/public/assets/vastra-mark-v2.png` and `vastra-intro.mp4` will be 131-byte pointer files instead of the actual binaries, and the app will render a broken logo. The Docker build will also fail fast with a clear error if it sees pointer files in its build context. (Hugging Face Spaces handles this automatically — only relevant for local clones.)
 
 ### 1. Backend Setup
 ```bash
