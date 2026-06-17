@@ -1,0 +1,13 @@
+id: adv_006_cart_without_browsing
+description: "Cart add without prior browsing — agent should not invent a product"
+tags: [cart, no-context]
+mcp_variant: default
+initial_product_context: []
+turns:
+  - user: "Add item number 12345 to my cart"
+    llm:
+      supervisor: '{"route": "cart"}'
+    expect:
+      route: cart
+      must_not_call:
+        - update_cart

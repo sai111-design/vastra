@@ -1,0 +1,19 @@
+id: golden_023_greeting_with_request
+description: "Greeting that also carries a shopping request routes to stylist"
+tags: [greeting, discovery]
+turns:
+  - user: "Hi! Can you show me some t-shirts?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts"
+              id: tc1
+        - content: "Welcome! The Classic Black Tee (₹399) and Oversized Charcoal Tee (₹599) are great choices."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true

@@ -1,0 +1,35 @@
+id: golden_020_mixed_browse_cart_checkout
+description: "Mixed flow: browse → add to cart → view cart"
+tags: [mixed, discovery, cart]
+turns:
+  - user: "Show me tees"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "tees"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) is a great everyday pick."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Add the black tee to my cart"
+    llm:
+      supervisor: '{"route": "cart"}'
+    interrupt: true
+    approved: true
+    expect:
+      route: cart
+      tools:
+        - name: update_cart
+  - user: "Show me my cart"
+    llm:
+      supervisor: '{"route": "cart"}'
+    expect:
+      route: cart
+      tools:
+        - name: get_cart

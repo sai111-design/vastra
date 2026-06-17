@@ -1,0 +1,34 @@
+id: golden_008_positional_second
+description: "Buyer refers to 'the second one' from a product list"
+tags: [positional, reference]
+turns:
+  - user: "Show me tees"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "tees"
+              id: tc1
+        - content: "Here are two great picks — the Classic Black Tee (₹399) and the Oversized Charcoal Tee (₹599)."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Tell me more about the second one"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: get_product_details
+              args:
+                product_id: "gid://shopify/Product/8808632582232"
+              id: tc2
+        - content: "The Classic Black Tee (₹399) is an essential crew-neck in soft cotton jersey, available in sizes S through L."
+    expect:
+      route: stylist
+      tools:
+        - name: get_product_details
+      reply_must_not_invent: true

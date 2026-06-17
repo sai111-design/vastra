@@ -1,0 +1,26 @@
+id: golden_012_cart_add_cancel
+description: "Buyer tries to add item but cancels at confirmation"
+tags: [cart, cancel]
+turns:
+  - user: "Show me t-shirts"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) is available in S, M, and L."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Add the black tee to my cart"
+    llm:
+      supervisor: '{"route": "cart"}'
+    interrupt: true
+    approved: false
+    expect:
+      route: cart

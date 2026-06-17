@@ -1,0 +1,34 @@
+id: golden_006_refinement_color
+description: "Buyer refines by asking for another color"
+tags: [refinement, color]
+turns:
+  - user: "Show me t-shirts"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) and the Oversized Charcoal Tee (₹599) are available."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Do you have these in charcoal?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "charcoal t-shirts"
+              id: tc2
+        - content: "The Oversized Charcoal Tee (₹599) comes in a heather charcoal with a drop-shoulder fit!"
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true

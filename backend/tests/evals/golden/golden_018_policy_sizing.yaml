@@ -1,0 +1,21 @@
+id: golden_018_policy_sizing
+description: "Buyer asks about size guide"
+tags: [policy, sizing]
+turns:
+  - user: "Do you have a size guide?"
+    llm:
+      supervisor: '{"route": "support"}'
+      agent:
+        - tool_calls:
+            - name: search_shop_policies_and_faqs
+              args:
+                query: "size guide"
+              id: tc1
+        - content: "Per our Returns & Exchanges policy, items can be returned within 7 days if they don't fit. For detailed sizing, please check the product page for measurements."
+    expect:
+      route: support
+      tools:
+        - name: search_shop_policies_and_faqs
+          args_contains:
+            query: "size"
+      reply_must_not_invent: true

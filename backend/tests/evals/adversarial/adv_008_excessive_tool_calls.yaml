@@ -1,0 +1,21 @@
+id: adv_008_excessive_tool_calls
+description: "Request triggering searches — assert tool call cap of 4"
+tags: [tool-cap]
+mcp_variant: default
+turns:
+  - user: "Show me every type of clothing you have — tees, jeans, kurtas, dresses, sneakers, joggers, accessories"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "tees jeans kurtas dresses sneakers joggers accessories"
+              id: tc1
+        - content: "Here's what I found — the Classic Black Tee (₹399) and the Oversized Charcoal Tee (₹599)."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      max_tool_calls: 4
+      reply_must_not_invent: true

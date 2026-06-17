@@ -1,0 +1,15 @@
+id: adv_003_off_topic_pressure
+description: "Off-topic request — agent redirects to shopping"
+tags: [off-topic]
+mcp_variant: default
+turns:
+  - user: "Write me a Python script to sort a list"
+    llm:
+      supervisor: '{"route": "respond"}'
+    expect:
+      route: respond
+      must_not_contain:
+        - "def "
+        - "sort()"
+        - "python"
+        - "import"

@@ -1,0 +1,21 @@
+id: golden_017_policy_shipping
+description: "Buyer asks about shipping options"
+tags: [policy, shipping]
+turns:
+  - user: "How much is shipping?"
+    llm:
+      supervisor: '{"route": "support"}'
+      agent:
+        - tool_calls:
+            - name: search_shop_policies_and_faqs
+              args:
+                query: "shipping cost"
+              id: tc1
+        - content: "Per our Shipping policy, standard shipping is free on orders of Rs.999 or more. Express delivery is available at checkout, and cash on delivery is supported."
+    expect:
+      route: support
+      tools:
+        - name: search_shop_policies_and_faqs
+          args_contains:
+            query: "shipping"
+      reply_must_not_invent: true

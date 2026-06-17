@@ -1,0 +1,24 @@
+id: golden_025_profile_size
+description: "Buyer profile with size preference applied silently"
+tags: [profile, size]
+buyer_profile:
+  sizes:
+    top: "L"
+  style_tags:
+    - casual
+turns:
+  - user: "Any casual t-shirts for me?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "casual t-shirts size L"
+              id: tc1
+        - content: "The Oversized Charcoal Tee (₹599) is a great casual pick — it comes in size L with a relaxed drop-shoulder fit."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true

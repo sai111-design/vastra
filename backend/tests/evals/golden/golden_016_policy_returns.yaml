@@ -1,0 +1,21 @@
+id: golden_016_policy_returns
+description: "Buyer asks about return policy"
+tags: [policy, returns]
+turns:
+  - user: "What's your return policy?"
+    llm:
+      supervisor: '{"route": "support"}'
+      agent:
+        - tool_calls:
+            - name: search_shop_policies_and_faqs
+              args:
+                query: "return policy"
+              id: tc1
+        - content: "Per our Returns & Exchanges policy, items can be returned or exchanged within 7 days of delivery, provided tags are intact and the item is unworn. Refunds are issued to the original payment method within 5-7 business days."
+    expect:
+      route: support
+      tools:
+        - name: search_shop_policies_and_faqs
+          args_contains:
+            query: "return"
+      reply_must_not_invent: true

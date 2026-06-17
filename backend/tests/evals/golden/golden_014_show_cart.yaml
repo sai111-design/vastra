@@ -1,0 +1,11 @@
+id: golden_014_show_cart
+description: "Buyer asks to see their cart"
+tags: [cart, view]
+turns:
+  - user: "Show me my cart"
+    llm:
+      supervisor: '{"route": "cart"}'
+    expect:
+      route: cart
+      tools:
+        - name: get_cart

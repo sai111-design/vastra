@@ -1,0 +1,28 @@
+id: golden_013_cart_add_cancel_no_mutation
+description: "Cancelled cart add must not call update_cart"
+tags: [cart, cancel, write-gating]
+turns:
+  - user: "I want a black tee"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "black tee"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) is a perfect pick."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Add it to my cart"
+    llm:
+      supervisor: '{"route": "cart"}'
+    interrupt: true
+    approved: false
+    expect:
+      route: cart
+      must_not_call:
+        - update_cart

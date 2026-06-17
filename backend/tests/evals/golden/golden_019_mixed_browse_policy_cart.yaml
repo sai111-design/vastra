@@ -1,0 +1,43 @@
+id: golden_019_mixed_browse_policy_cart
+description: "Mixed flow: browse → policy question → add to cart"
+tags: [mixed, discovery, policy, cart]
+turns:
+  - user: "Show me some t-shirts"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) and Oversized Charcoal Tee (₹599) are great options."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "What's your return policy if it doesn't fit?"
+    llm:
+      supervisor: '{"route": "support"}'
+      agent:
+        - tool_calls:
+            - name: search_shop_policies_and_faqs
+              args:
+                query: "return policy doesn't fit"
+              id: tc2
+        - content: "Per our Returns & Exchanges policy, items can be returned within 7 days of delivery if tags are intact."
+    expect:
+      route: support
+      tools:
+        - name: search_shop_policies_and_faqs
+      reply_must_not_invent: true
+  - user: "Ok, add the black tee in M to my cart"
+    llm:
+      supervisor: '{"route": "cart"}'
+    interrupt: true
+    approved: true
+    expect:
+      route: cart
+      tools:
+        - name: update_cart

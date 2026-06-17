@@ -1,0 +1,34 @@
+id: golden_009_positional_that_one
+description: "Buyer says 'that one' referring to a recently shown product"
+tags: [positional, reference]
+turns:
+  - user: "Show me t-shirts"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) is a solid everyday pick."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Can I see more details on that one?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: get_product_details
+              args:
+                product_id: "gid://shopify/Product/8808632549464"
+              id: tc2
+        - content: "The Classic Black Tee (₹399) comes in sizes S, M, L, and XL in Black. It's a crew-neck in soft cotton jersey."
+    expect:
+      route: stylist
+      tools:
+        - name: get_product_details
+      reply_must_not_invent: true

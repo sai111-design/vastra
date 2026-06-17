@@ -7,7 +7,6 @@ All rows are returned as plain ``dict`` objects.
 
 from __future__ import annotations
 
-from typing import Any
 
 from backend.db.connection import get_conn
 

@@ -1,0 +1,28 @@
+id: golden_011_cart_add_confirm_second
+description: "Buyer adds a different item to cart and confirms"
+tags: [cart, confirm]
+turns:
+  - user: "Show me tees"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "tees"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) and Oversized Charcoal Tee (₹599) are available."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Add the charcoal one to my cart please"
+    llm:
+      supervisor: '{"route": "cart"}'
+    interrupt: true
+    approved: true
+    expect:
+      route: cart
+      tools:
+        - name: update_cart

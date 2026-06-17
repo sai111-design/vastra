@@ -1,0 +1,21 @@
+id: golden_003_basic_discovery_budget
+description: "Buyer searches with a budget constraint"
+tags: [discovery, budget]
+turns:
+  - user: "Show me t-shirts under 500 rupees"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts under 500"
+              id: tc1
+        - content: "The Classic Black Tee at ₹399 fits right in your budget — soft cotton jersey in a timeless crew-neck cut."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+          args_contains:
+            query: "t-shirts"
+      reply_must_not_invent: true

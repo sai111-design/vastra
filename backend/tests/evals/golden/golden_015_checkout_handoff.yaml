@@ -1,0 +1,11 @@
+id: golden_015_checkout_handoff
+description: "Buyer asks to checkout — cart is shown with checkout URL"
+tags: [cart, checkout]
+turns:
+  - user: "I'd like to checkout"
+    llm:
+      supervisor: '{"route": "cart"}'
+    expect:
+      route: cart
+      tools:
+        - name: get_cart

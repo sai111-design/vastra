@@ -1,0 +1,9 @@
+id: golden_022_greeting_pure
+description: "Pure greeting routes to respond"
+tags: [greeting, small-talk]
+turns:
+  - user: "Hello!"
+    llm:
+      supervisor: '{"route": "respond"}'
+    expect:
+      route: respond

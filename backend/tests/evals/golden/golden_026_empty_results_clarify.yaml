@@ -1,0 +1,19 @@
+id: golden_026_empty_results_clarify
+description: "Search returns products but none match exactly — agent still uses tool data"
+tags: [edge-case, empty]
+turns:
+  - user: "Do you have silk evening gowns?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "silk evening gowns"
+              id: tc1
+        - content: "I didn't find silk evening gowns specifically, but we have the Classic Black Tee (₹399) and Oversized Charcoal Tee (₹599). Would you like me to search for something else?"
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true

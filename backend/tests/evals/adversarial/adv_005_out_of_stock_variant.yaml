@@ -1,0 +1,20 @@
+id: adv_005_out_of_stock_variant
+description: "Buyer tries to add out-of-stock variant — graceful handling"
+tags: [out-of-stock, cart]
+mcp_variant: default
+turns:
+  - user: "Show me black tees"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "black tees"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) is available in S and M. Note that size L is currently out of stock."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true

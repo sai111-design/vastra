@@ -1,0 +1,34 @@
+id: golden_007_refinement_formal
+description: "Buyer asks for more formal options"
+tags: [refinement, style]
+turns:
+  - user: "What t-shirts do you have?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts"
+              id: tc1
+        - content: "We have the Classic Black Tee (₹399) and the Oversized Charcoal Tee (₹599)."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "Something more formal or office-appropriate?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "formal office wear tees"
+              id: tc2
+        - content: "The Classic Black Tee (₹399) works well for smart-casual office looks — the crew-neck keeps it clean and polished."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true

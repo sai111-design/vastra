@@ -1,0 +1,9 @@
+id: golden_028_thanks_goodbye
+description: "Buyer says thanks and goodbye"
+tags: [greeting, goodbye]
+turns:
+  - user: "Thanks for your help, bye!"
+    llm:
+      supervisor: '{"route": "respond"}'
+    expect:
+      route: respond

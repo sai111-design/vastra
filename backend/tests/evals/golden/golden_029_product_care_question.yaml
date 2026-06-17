@@ -1,0 +1,19 @@
+id: golden_029_product_care_question
+description: "Product-specific care question routes to stylist (not support)"
+tags: [edge-case, routing]
+turns:
+  - user: "Can I machine-wash the Classic Black Tee?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: get_product_details
+              args:
+                product_id: "gid://shopify/Product/8808632549464"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) is made of soft cotton jersey. For specific care instructions, please check the product label."
+    expect:
+      route: stylist
+      tools:
+        - name: get_product_details
+      reply_must_not_invent: true

@@ -1,0 +1,23 @@
+id: golden_024_profile_budget
+description: "Buyer profile with budget constraint applied silently"
+tags: [profile, budget]
+buyer_profile:
+  budget_max: 500
+  sizes:
+    top: "M"
+turns:
+  - user: "Show me t-shirts"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "t-shirts under 500"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) fits your budget perfectly — a soft cotton crew-neck in size M."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true

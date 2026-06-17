@@ -1,0 +1,34 @@
+id: golden_027_product_details_request
+description: "Buyer asks for detailed info on a specific product"
+tags: [discovery, details]
+turns:
+  - user: "Show me black tees"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "black tees"
+              id: tc1
+        - content: "The Classic Black Tee (₹399) is available in S, M, and L."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+      reply_must_not_invent: true
+  - user: "What sizes are available for the Classic Black Tee?"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: get_product_details
+              args:
+                product_id: "gid://shopify/Product/8808632549464"
+              id: tc2
+        - content: "The Classic Black Tee (₹399) is available in sizes S, M, L, and XL in Black."
+    expect:
+      route: stylist
+      tools:
+        - name: get_product_details
+      reply_must_not_invent: true
