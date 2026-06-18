@@ -25,7 +25,9 @@ from backend.llm.fallback import FallbackChat
 
 logger = logging.getLogger(__name__)
 
-ROUTES: frozenset[str] = frozenset({"stylist", "cart", "support", "respond"})
+ROUTES: frozenset[str] = frozenset(
+    {"stylist", "cart", "support", "respond", "complete_look"}
+)
 DEFAULT_ROUTE = "stylist"
 
 # Crude but provider-independent token estimate: ~4 characters per token, plus
@@ -132,7 +134,7 @@ def parse_route(text: str) -> str:
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
 
-    match = re.search(r'"route"\s*:\s*"(\w+)"', text)
+    match = re.search(r'"route"\s*:\s*"([\w_]+)"', text)
     if match and match.group(1).lower() in ROUTES:
         return match.group(1).lower()
 

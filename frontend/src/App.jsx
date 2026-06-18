@@ -1,7 +1,55 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 import useChatStream from './hooks/useChatStream';
 import ProductCardRow from './components/ProductCardRow';
+import ProductShelf from './components/ProductShelf';
+import SuggestionChips from './components/SuggestionChips';
+import OutfitPrompt from './components/OutfitPrompt';
+import LookCardRow from './components/LookCardRow';
+import OnboardingFlow from './components/OnboardingFlow';
 import ConfirmChip from './components/ConfirmChip';
+
+const ONBOARDED_KEY = 'vastra_onboarded';
+
+function readOnboarded() {
+  try {
+    return typeof window !== 'undefined' && window.localStorage?.getItem(ONBOARDED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function markOnboarded() {
+  try { window.localStorage?.setItem(ONBOARDED_KEY, '1'); } catch {}
+}
+
+const CATEGORY_LABELS = {
+  tops: 'tops',
+  bottoms: 'bottoms',
+  dresses: 'dresses',
+  footwear: 'footwear',
+  accessories: 'accessories',
+};
+
+function firstMessageFromAnswers({ vibe, budget, categories }) {
+  if (!categories || categories.length === 0) return null;
+  if (categories.includes('surprise_me')) {
+    return 'Surprise me with something nice';
+  }
+  const labels = categories.map(c => CATEGORY_LABELS[c]).filter(Boolean);
+  if (labels.length === 0) return null;
+  const joined = labels.length === 1
+    ? labels[0]
+    : labels.slice(0, -1).join(', ') + ' or ' + labels.at(-1);
+  const vibeWord = vibe && vibe !== 'casual' ? ` (${vibe} vibe)` : '';
+  const budgetWord = budget === 'under_500'
+    ? ' under ₹500'
+    : budget === '500_1500'
+      ? ' between ₹500 and ₹1500'
+      : budget === 'above_1500'
+        ? ' over ₹1500'
+        : '';
+  return `Show me some ${joined}${budgetWord}${vibeWord}`;
+}
 import CheckoutBanner from './components/CheckoutBanner';
 import CartDrawer from './components/CartDrawer';
 import Composer from './components/Composer';
@@ -51,9 +99,44 @@ function CartIcon() {
 export default function App() {
   const chat = useChatStream();
   const endRef = useRef(null);
+  const [shelfOpen, setShelfOpen] = useState(true);
+  const [showOnboarding, setShowOnboarding] = useState(() => !readOnboarded());
 
   const view = chat.currentSessionId ? 'chat' : 'sessions';
   const cartCount = chat.cart?.total_quantity || chat.cart?.lines?.length || 0;
+  const buyerSizes = chat.buyerProfile?.sizes ?? [];
+
+  const handleShelfClick = useCallback((product) => {
+    if (!product?.title) return;
+    chat.sendMessage(`Tell me more about ${product.title}`);
+  }, [chat]);
+
+  const handleSuggestionSelect = useCallback((text) => {
+    chat.clearSuggestions();
+    chat.sendMessage(text);
+  }, [chat]);
+
+  const handleComposerInput = useCallback(() => {
+    if (chat.suggestions && chat.suggestions.length > 0) {
+      chat.clearSuggestions();
+    }
+  }, [chat]);
+
+  const toggleShelf = useCallback(() => setShelfOpen(o => !o), []);
+
+  const handleOnboardingComplete = useCallback(async (answers) => {
+    markOnboarded();
+    setShowOnboarding(false);
+    const sid = await chat.createSession(answers);
+    if (!sid) return;
+    const firstMessage = firstMessageFromAnswers(answers);
+    if (firstMessage) chat.sendMessage(firstMessage, sid);
+  }, [chat]);
+
+  const handleOnboardingSkip = useCallback(() => {
+    markOnboarded();
+    setShowOnboarding(false);
+  }, []);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -74,6 +157,15 @@ export default function App() {
         </div>
         <div className="app-loading-bar"><div className="app-loading-bar-fill" /></div>
       </div>
+    );
+  }
+
+  if (showOnboarding) {
+    return (
+      <OnboardingFlow
+        onComplete={handleOnboardingComplete}
+        onSkip={handleOnboardingSkip}
+      />
     );
   }
 
@@ -106,7 +198,17 @@ export default function App() {
     }
 
     if (msg.productCards) {
-      items.push(<ProductCardRow key={`pc${idx}`} products={msg.productCards} />);
+      if (msg.lookCompletion) {
+        items.push(
+          <LookCardRow
+            key={`lc${idx}`}
+            products={msg.productCards}
+            intro={msg.lookIntro || ''}
+          />
+        );
+      } else {
+        items.push(<ProductCardRow key={`pc${idx}`} products={msg.productCards} />);
+      }
     }
 
     if (msg.confirmRequest && !msg.confirmResolved && chat.pendingConfirm) {
@@ -123,11 +225,31 @@ export default function App() {
       items.push(<CheckoutBanner key={`cb${idx}`} cart={msg.cartUpdate} />);
     }
 
+    if (msg.outfitPrompt) {
+      const promptKey = msg.id != null ? `op-${msg.id}` : `op-i-${idx}`;
+      const dismissed = chat.dismissedOutfitPrompts?.has(promptKey);
+      if (!dismissed) {
+        items.push(
+          <OutfitPrompt
+            key={`op${idx}`}
+            visible={true}
+            onAccept={() => {
+              chat.dismissOutfitPrompt(promptKey);
+              chat.sendMessage('Yes, complete the look');
+            }}
+            onDismiss={() => chat.dismissOutfitPrompt(promptKey)}
+          />
+        );
+      }
+    }
+
     return items;
   };
 
+  const layoutClass = `app-layout${shelfOpen ? '' : ' shelf-collapsed'}`;
+
   return (
-    <div className="app-layout" data-view={view}>
+    <div className={layoutClass} data-view={view}>
 
       {/* ── Desktop sidebar ── */}
       <aside className="sidebar">
@@ -221,12 +343,25 @@ export default function App() {
               </div>
             )}
 
+            <SuggestionChips
+              suggestions={chat.suggestions}
+              onSelect={handleSuggestionSelect}
+              disabled={chat.isStreaming || !!chat.pendingConfirm}
+            />
             <Composer
               onSend={chat.sendMessage}
+              onInput={handleComposerInput}
               disabled={chat.isStreaming}
               locked={!!chat.pendingConfirm}
             />
             <CartDrawer cart={chat.cart} open={chat.cartOpen} onClose={chat.toggleCart} />
+            <button
+              className="shelf-toggle-btn"
+              onClick={toggleShelf}
+              aria-label={shelfOpen ? 'Hide product shelf' : 'Show product shelf'}
+            >
+              {shelfOpen ? '↓' : '↑'}
+            </button>
           </>
         ) : (
           /* Desktop empty detail pane */
@@ -244,6 +379,12 @@ export default function App() {
           </div>
         )}
       </main>
+
+      <ProductShelf
+        products={chat.shelfProducts}
+        buyerSizes={buyerSizes}
+        onProductClick={handleShelfClick}
+      />
     </div>
   );
 }

@@ -30,6 +30,9 @@ EVENT_ROUTE = "route"
 EVENT_PRODUCT_CARDS = "product_cards"
 EVENT_CONFIRM_REQUEST = "confirm_request"
 EVENT_CART_UPDATE = "cart_update"
+# Static nudge fired after an approved cart write succeeded; not an agent
+# decision, so the API layer (not the graph) emits it.
+EVENT_OUTFIT_PROMPT = "outfit_prompt"
 EVENT_ERROR = "error"
 EVENT_DONE = "done"
 

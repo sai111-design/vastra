@@ -30,19 +30,25 @@ for a value-fashion Shopify store. Read the conversation and classify the buyer'
 LATEST message into exactly one route.
 
 Routes:
-- "stylist"  — product discovery: searching, browsing, recommendations, styling advice, \
+- "stylist"        — product discovery: searching, browsing, recommendations, styling advice, \
 or questions about specific products (fit, fabric, colours, sizes, what something costs).
-- "cart"     — cart transactions ONLY: the message contains an explicit transactional verb \
+- "cart"           — cart transactions ONLY: the message contains an explicit transactional verb \
 ("add", "remove", "delete", "update the quantity", "checkout", "buy it now") or a direct \
 cart reference ("my cart", "what's in the cart", "empty my basket").
-- "support"  — store policies and logistics: returns, refunds, exchanges, shipping costs \
+- "support"        — store policies and logistics: returns, refunds, exchanges, shipping costs \
 and times, cash on delivery, payment options, the size guide, store FAQs.
-- "respond"  — pure greetings, thanks, goodbyes, or small talk that contains no shopping \
+- "complete_look"  — the buyer wants pieces that pair with what they just looked at or added \
+to their cart. Pick this when the message says things like "complete the look", "complete \
+my look", "what goes with this", "suggest an outfit", "what should I wear with it", \
+"style this", or accepts a previous nudge ("yes, complete the look", "go on, find pairings").
+- "respond"        — pure greetings, thanks, goodbyes, or small talk that contains no shopping \
 request at all ("hi", "thanks!", "bye", "you're awesome").
 
 Rules:
 - "cart" requires that explicit transactional verb or cart reference. Desire alone \
 ("I want a black tee", "I'm looking for jeans") is discovery, not a transaction → "stylist".
+- "complete_look" wins over "stylist" when the buyer is asking for *pairings* with a piece \
+they've already discussed, not a fresh open-ended search.
 - If the message is ambiguous between discovery and anything else, choose "stylist".
 - A greeting or thanks that ALSO carries a request routes by the request, not "respond" \
 ("thanks! now show me kurtas" → "stylist").
@@ -52,7 +58,7 @@ still "stylist"; store-wide policy ("what's your return policy?") is "support".
 Buyer profile (background context only — it never changes the route): {buyer_profile}
 
 Reply with ONLY this JSON object on a single line, no prose, no code fences:
-{"route": "stylist" | "cart" | "support" | "respond"}"""
+{"route": "stylist" | "cart" | "support" | "complete_look" | "respond"}"""
 
 
 # --- Stylist (v1, Stage 4) ---------------------------------------------------
@@ -158,6 +164,36 @@ policy answer is worse than admitting the store has not published one.
 """ + TOOL_DATA_INSTRUCTION + """
 
 Buyer profile (background only): {buyer_profile}"""
+
+
+# --- Complete the Look (E3) --------------------------------------------------
+# Two-phase prompt: the model first picks two complementary categories for the
+# items the buyer just looked at / added (JSON-only output, no tool calls), then
+# the node runs one search_catalog per category. The 70B model is used here
+# because category selection needs real fashion reasoning.
+COMPLETE_LOOK_PLAN_PROMPT = """You are the Vastra Stylist building a "Complete the Look" \
+suggestion for a value-fashion store (think Zudio price range). The buyer just looked at \
+or added one or two items to their cart; your job is to pick TWO complementary clothing \
+categories that pair well with what they have, so we can search the catalog for matching \
+pieces.
+
+Rules:
+- Only suggest categories the store carries: tees, shirts, kurtas, jeans, joggers, trousers, \
+dresses, skirts, sneakers, sandals, jackets, accessories (belts, caps, scarves).
+- The two categories must be DIFFERENT (e.g. don't suggest two kinds of tee). Aim for one \
+"completer" garment plus one footwear / accessory.
+- Keep suggestions practical and in a similar value-fashion price range. No suits, no \
+designer pieces.
+- Categories should be 1–3 word phrases suitable to drop straight into a catalog search \
+("denim jeans", "white sneakers", "minimal belt").
+- The intro is a single warm sentence under 90 characters, no emoji, no question marks.
+
+Output ONLY this JSON object on one line, no prose, no code fences:
+{"intro": "<one sentence intro>", "categories": ["<cat1>", "<cat2>"]}
+
+Items the buyer recently engaged with: {product_context}
+
+Buyer profile (background only — use silently to shape category choice): {buyer_profile}"""
 
 
 # --- Preference Extractor (v1, Stage 5) --------------------------------------

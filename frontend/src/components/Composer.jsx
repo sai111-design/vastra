@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react';
 
-export default function Composer({ onSend, disabled, locked }) {
+export default function Composer({ onSend, disabled, locked, onInput }) {
   const [text, setText] = useState('');
   const textareaRef = useRef(null);
 
@@ -40,7 +40,7 @@ export default function Composer({ onSend, disabled, locked }) {
           className="composer-input"
           placeholder="Message vastra..."
           value={text}
-          onChange={(e) => { setText(e.target.value); autoResize(); }}
+          onChange={(e) => { setText(e.target.value); autoResize(); if (onInput) onInput(e.target.value); }}
           onKeyDown={handleKeyDown}
           disabled={disabled || locked}
           rows={1}

@@ -333,6 +333,7 @@ def make_cart_node(tools: list, llm: Any | None = None):
         cap = _max_tool_calls()
         executed = 0
         cart_update: dict | None = None
+        cart_mutated = False
         tool_failed = False
 
         response = await chat.ainvoke(messages)
@@ -371,6 +372,7 @@ def make_cart_node(tools: list, llm: Any | None = None):
                     payload = cart_update_from_json(text)
                     if payload:
                         cart_update = payload
+                        cart_mutated = True
                     messages.append(
                         ToolMessage(content=sanitize_tool_output(text), tool_call_id=call_id, name=name)
                     )
@@ -435,6 +437,12 @@ def make_cart_node(tools: list, llm: Any | None = None):
             update["cart_snapshot"] = cart_update
             if cart_update.get("cart_id"):
                 update["cart_id"] = cart_update["cart_id"]
+        if cart_mutated:
+            # An approved update_cart just landed — flag it so the Outfit
+            # Builder can lean toward "Complete the Look" on the next turn.
+            # Only set on the mutating path (the get_cart read path leaves
+            # `cart_mutated` false), so this fires strictly post-approval.
+            update["last_cart_action_confirmed"] = True
         return update
 
     return cart_node

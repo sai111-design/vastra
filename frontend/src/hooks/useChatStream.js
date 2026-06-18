@@ -8,9 +8,12 @@ function enrichMessage(msg) {
     content: msg.content || '',
     route: null,
     productCards: null,
+    lookCompletion: false,
+    lookIntro: '',
     confirmRequest: null,
     confirmResolved: null,
     cartUpdate: null,
+    outfitPrompt: null,
     error: null,
     fallbackUsed: false,
   };
@@ -21,9 +24,14 @@ function enrichMessage(msg) {
       const kind = evt.event || evt.type;
       switch (kind) {
         case 'route': rich.route = evt.data?.agent; break;
-        case 'product_cards': rich.productCards = evt.data?.products; break;
+        case 'product_cards':
+          rich.productCards = evt.data?.products;
+          rich.lookCompletion = !!evt.data?.look_completion;
+          rich.lookIntro = evt.data?.look_intro || '';
+          break;
         case 'confirm_request': rich.confirmRequest = evt.data; break;
         case 'cart_update': rich.cartUpdate = evt.data; break;
+        case 'outfit_prompt': rich.outfitPrompt = evt.data; break;
         case 'error': rich.error = evt.data; break;
         case 'done': rich.fallbackUsed = evt.data?.fallback_used || false; break;
       }
@@ -64,6 +72,10 @@ export default function useChatStream() {
   const [route, setRoute] = useState(null);
   const [error, setError] = useState(null);
   const [cartOpen, setCartOpen] = useState(false);
+  const [shelfProducts, setShelfProducts] = useState([]);
+  const [buyerProfile, setBuyerProfile] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
+  const [dismissedOutfitPrompts, setDismissedOutfitPrompts] = useState(() => new Set());
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -94,9 +106,9 @@ export default function useChatStream() {
     return () => { cancelled = true; };
   }, []);
 
-  const createSession = useCallback(async () => {
+  const createSession = useCallback(async (initialProfile = null) => {
     try {
-      const data = await api.createSession();
+      const data = await api.createSession(initialProfile);
       const sid = data.session_id;
       setCurrentSessionId(sid);
       setMessages([]);
@@ -104,6 +116,9 @@ export default function useChatStream() {
       setPendingConfirm(null);
       setRoute(null);
       setError(null);
+      setShelfProducts([]);
+      setSuggestions([]);
+      setDismissedOutfitPrompts(new Set());
       setSessions(prev => [{ session_id: sid, preview: null, last_active: new Date().toISOString() }, ...prev]);
       return sid;
     } catch (e) {
@@ -119,11 +134,15 @@ export default function useChatStream() {
     setRoute(null);
     setError(null);
     setCartOpen(false);
+    setSuggestions([]);
+    setDismissedOutfitPrompts(new Set());
     try {
       const data = await api.getSession(sessionId);
       const enriched = resolveConfirms((data.messages || []).map(enrichMessage));
       setMessages(enriched);
       setCart(deriveCart(enriched));
+      const lastCards = [...enriched].reverse().find(m => m.productCards && m.productCards.length > 0);
+      setShelfProducts(lastCards ? lastCards.productCards : []);
       const lastConfirm = [...enriched].reverse().find(m => m.confirmRequest && !m.confirmResolved);
       if (lastConfirm) setPendingConfirm(lastConfirm.confirmRequest);
     } catch (e) {
@@ -140,13 +159,19 @@ export default function useChatStream() {
     setIsStreaming(true);
     setError(null);
     setRoute(null);
+    setSuggestions([]);
 
-    const acc = { text: '', route: null, cards: null, confirm: null, cartUpd: null, err: null, fallback: false, gotDone: false };
+    const acc = {
+      text: '', route: null, cards: null, lookCompletion: false, lookIntro: '',
+      confirm: null, cartUpd: null, outfit: null,
+      err: null, fallback: false, gotDone: false,
+    };
 
     const updateStream = () => {
       setStreamingMessage({
         id: null, role: 'assistant', content: acc.text, route: acc.route,
-        productCards: acc.cards, confirmRequest: acc.confirm, cartUpdate: acc.cartUpd,
+        productCards: acc.cards, lookCompletion: acc.lookCompletion, lookIntro: acc.lookIntro,
+        confirmRequest: acc.confirm, cartUpdate: acc.cartUpd, outfitPrompt: acc.outfit,
         error: acc.err, fallbackUsed: acc.fallback, isStreaming: true,
       });
     };
@@ -166,11 +191,17 @@ export default function useChatStream() {
             break;
           case 'product_cards':
             acc.cards = event.data.products;
+            acc.lookCompletion = !!event.data.look_completion;
+            acc.lookIntro = event.data.look_intro || '';
+            if (event.data.products && event.data.products.length > 0) {
+              setShelfProducts(event.data.products);
+            }
             updateStream();
             break;
           case 'confirm_request':
             acc.confirm = event.data;
             setPendingConfirm(event.data);
+            setSuggestions([]);
             updateStream();
             break;
           case 'cart_update':
@@ -188,11 +219,16 @@ export default function useChatStream() {
             acc.fallback = event.data.fallback_used || false;
             setMessages(prev => [...prev, {
               id: event.data.turn_id, role: 'assistant', content: acc.text,
-              route: acc.route, productCards: acc.cards, confirmRequest: acc.confirm,
-              confirmResolved: null, cartUpdate: acc.cartUpd, error: acc.err,
-              fallbackUsed: acc.fallback,
+              route: acc.route, productCards: acc.cards,
+              lookCompletion: acc.lookCompletion, lookIntro: acc.lookIntro,
+              confirmRequest: acc.confirm, confirmResolved: null,
+              cartUpdate: acc.cartUpd, outfitPrompt: acc.outfit,
+              error: acc.err, fallbackUsed: acc.fallback,
             }]);
             setStreamingMessage(null);
+            if (!acc.confirm) {
+              setSuggestions(Array.isArray(event.data.suggestions) ? event.data.suggestions : []);
+            }
             break;
         }
       });
@@ -202,9 +238,11 @@ export default function useChatStream() {
       if (!acc.gotDone && (acc.text || acc.confirm || acc.cards || acc.cartUpd || acc.err)) {
         setMessages(prev => [...prev, {
           id: Date.now(), role: 'assistant', content: acc.text,
-          route: acc.route, productCards: acc.cards, confirmRequest: acc.confirm,
-          confirmResolved: null, cartUpdate: acc.cartUpd, error: acc.err,
-          fallbackUsed: acc.fallback,
+          route: acc.route, productCards: acc.cards,
+          lookCompletion: acc.lookCompletion, lookIntro: acc.lookIntro,
+          confirmRequest: acc.confirm, confirmResolved: null,
+          cartUpdate: acc.cartUpd, outfitPrompt: acc.outfit,
+          error: acc.err, fallbackUsed: acc.fallback,
         }]);
       }
       setStreamingMessage(null);
@@ -226,12 +264,17 @@ export default function useChatStream() {
         : m
     ));
 
-    const acc = { text: '', route: null, cards: null, cartUpd: null, err: null, fallback: false, gotDone: false };
+    const acc = {
+      text: '', route: null, cards: null, lookCompletion: false, lookIntro: '',
+      cartUpd: null, outfit: null,
+      err: null, fallback: false, gotDone: false,
+    };
 
     const updateStream = () => {
       setStreamingMessage({
         id: null, role: 'assistant', content: acc.text, route: acc.route,
-        productCards: acc.cards, cartUpdate: acc.cartUpd,
+        productCards: acc.cards, lookCompletion: acc.lookCompletion, lookIntro: acc.lookIntro,
+        cartUpdate: acc.cartUpd, outfitPrompt: acc.outfit,
         error: acc.err, fallbackUsed: acc.fallback, isStreaming: true,
       });
     };
@@ -243,18 +286,30 @@ export default function useChatStream() {
         switch (event.type) {
           case 'route': acc.route = event.data.agent; setRoute(event.data.agent); break;
           case 'token': acc.text += event.data.text; updateStream(); break;
-          case 'product_cards': acc.cards = event.data.products; updateStream(); break;
+          case 'product_cards':
+            acc.cards = event.data.products;
+            acc.lookCompletion = !!event.data.look_completion;
+            acc.lookIntro = event.data.look_intro || '';
+            if (event.data.products && event.data.products.length > 0) {
+              setShelfProducts(event.data.products);
+            }
+            updateStream();
+            break;
           case 'cart_update': acc.cartUpd = event.data; setCart(event.data); updateStream(); break;
+          case 'outfit_prompt': acc.outfit = event.data; updateStream(); break;
           case 'error': acc.err = event.data; setError(event.data.message); updateStream(); break;
           case 'done':
             acc.gotDone = true;
             acc.fallback = event.data.fallback_used || false;
             setMessages(prev => [...prev, {
               id: event.data.turn_id, role: 'assistant', content: acc.text,
-              route: acc.route, productCards: acc.cards, cartUpdate: acc.cartUpd,
+              route: acc.route, productCards: acc.cards,
+              lookCompletion: acc.lookCompletion, lookIntro: acc.lookIntro,
+              cartUpdate: acc.cartUpd, outfitPrompt: acc.outfit,
               error: acc.err, fallbackUsed: acc.fallback,
             }]);
             setStreamingMessage(null);
+            setSuggestions(Array.isArray(event.data.suggestions) ? event.data.suggestions : []);
             break;
         }
       });
@@ -264,7 +319,9 @@ export default function useChatStream() {
       if (!acc.gotDone && acc.text) {
         setMessages(prev => [...prev, {
           id: Date.now(), role: 'assistant', content: acc.text,
-          route: acc.route, productCards: acc.cards, cartUpdate: acc.cartUpd,
+          route: acc.route, productCards: acc.cards,
+          lookCompletion: acc.lookCompletion, lookIntro: acc.lookIntro,
+          cartUpdate: acc.cartUpd, outfitPrompt: acc.outfit,
           error: acc.err, fallbackUsed: acc.fallback,
         }]);
       }
@@ -286,12 +343,27 @@ export default function useChatStream() {
     setRoute(null);
     setError(null);
     setCartOpen(false);
+    setShelfProducts([]);
+    setSuggestions([]);
+    setDismissedOutfitPrompts(new Set());
+  }, []);
+
+  const clearSuggestions = useCallback(() => setSuggestions([]), []);
+
+  const dismissOutfitPrompt = useCallback((messageKey) => {
+    setDismissedOutfitPrompts(prev => {
+      if (prev.has(messageKey)) return prev;
+      const next = new Set(prev);
+      next.add(messageKey);
+      return next;
+    });
   }, []);
 
   return {
     appReady, sessions, currentSessionId, messages, streamingMessage,
     cart, pendingConfirm, isStreaming, route, error, cartOpen,
+    shelfProducts, buyerProfile, suggestions, dismissedOutfitPrompts,
     createSession, openSession, sendMessage, confirmAction: handleConfirm,
-    toggleCart, goBack, clearError,
+    toggleCart, goBack, clearError, clearSuggestions, dismissOutfitPrompt,
   };
 }

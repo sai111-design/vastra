@@ -24,6 +24,9 @@ SCOPES: dict[str, set[str]] = {
     "stylist": {"search_catalog", "get_product_details"},
     "cart": {"get_cart", "update_cart"},
     "support": {"search_shop_policies_and_faqs"},
+    # Outfit Builder (E3): plans two complementary categories, then issues one
+    # search per category. No cart writes, no details lookup.
+    "complete_look": {"search_catalog"},
 }
 
 # langchain-mcp-adapters has renamed / aliased the streaming HTTP transport

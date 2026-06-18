@@ -40,6 +40,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from backend.agents.extractor import extract_preferences, merge_profile
+from backend.agents.suggestions import generate_suggestions
 from backend.agents.supervisor import _message_text
 from backend.db.queries import (
     get_buyer_profile,
@@ -53,6 +54,7 @@ from backend.streaming.sse import (
     EVENT_CART_UPDATE,
     EVENT_CONFIRM_REQUEST,
     EVENT_DONE,
+    EVENT_OUTFIT_PROMPT,
     EVENT_PRODUCT_CARDS,
     EVENT_ROUTE,
     EVENT_TOKEN,
@@ -60,12 +62,18 @@ from backend.streaming.sse import (
     sse,
 )
 
+# Static nudge payload — fired once after every approved cart write.
+OUTFIT_PROMPT_PAYLOAD = {
+    "message": "Want me to find pieces that go with it?",
+    "action": "complete_look",
+}
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
 MAX_MESSAGE_CHARS = 1000
-_SPECIALIST_NODES = {"stylist", "cart", "support"}
+_SPECIALIST_NODES = {"stylist", "cart", "support", "complete_look"}
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +184,45 @@ async def _pending_interrupt(graph: Any, config: dict) -> dict | None:
     return None
 
 
+# Bound on the post-turn suggestion call so a slow 8B response can't extend a
+# completed turn for more than half a second. If it trips, the ``done`` event
+# still ships with ``suggestions: []`` and the frontend simply renders nothing.
+SUGGESTION_TIMEOUT_SECS = 1.5
+
+
+async def _safe_generate_suggestions(
+    graph: Any, config: dict, final_text: str, default_route: str
+) -> list[str]:
+    """Read route + product_context off the latest snapshot, then await chips.
+
+    Always returns a list — never raises. Returns ``[]`` when there's no reply
+    text to base chips on, when the state read fails, when the timeout trips,
+    or when the model itself errors.
+    """
+
+    if not final_text:
+        return []
+    try:
+        snapshot = await graph.aget_state(config)
+        values = getattr(snapshot, "values", {}) or {}
+        route = values.get("route") or default_route or "respond"
+        product_context = values.get("product_context") or []
+    except Exception as exc:  # noqa: BLE001 - never block done on a state read
+        logger.warning("State read for suggestions failed: %s", exc)
+        return []
+    try:
+        return await asyncio.wait_for(
+            generate_suggestions(final_text, route, product_context),
+            timeout=SUGGESTION_TIMEOUT_SECS,
+        )
+    except asyncio.TimeoutError:
+        logger.info("Suggestion generation exceeded %.1fs; emitting []", SUGGESTION_TIMEOUT_SECS)
+        return []
+    except Exception as exc:  # noqa: BLE001 - generate_suggestions already shields, defense in depth
+        logger.warning("Suggestion generation raised: %s", exc)
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Shared graph-event streaming
 # ---------------------------------------------------------------------------
@@ -283,12 +330,16 @@ async def chat(request: Request, body: ChatRequest) -> Any:
         final_text = ""
         fallback_used = False
         cart_id = ""
+        last_route = ""
 
         async for emission in _stream_graph(graph, graph_input, config):
             if "sse" in emission:
                 yield emission["sse"]
             if "replay" in emission:
+                evt_name, evt_data = emission["replay"]
                 replay_events.append(emission["replay"])
+                if evt_name == EVENT_ROUTE:
+                    last_route = evt_data.get("agent") or last_route
             if emission.get("final_text"):
                 final_text = emission["final_text"]
             if emission.get("fallback"):
@@ -322,7 +373,18 @@ async def chat(request: Request, body: ChatRequest) -> Any:
         if final_text:
             _schedule_extraction(app, body.session_id, body.message, final_text)
 
-        yield sse(EVENT_DONE, {"turn_id": turn_id, "fallback_used": fallback_used})
+        suggestions = await _safe_generate_suggestions(
+            graph, config, final_text, last_route
+        )
+
+        yield sse(
+            EVENT_DONE,
+            {
+                "turn_id": turn_id,
+                "fallback_used": fallback_used,
+                "suggestions": suggestions,
+            },
+        )
 
     return event_response(generator())
 
@@ -353,18 +415,32 @@ async def confirm(request: Request, body: ConfirmRequest) -> Any:
         final_text = ""
         fallback_used = False
         cart_id = ""
+        last_route = ""
+        cart_updated = False
 
         async for emission in _stream_graph(graph, resume_input, config):
             if "sse" in emission:
                 yield emission["sse"]
             if "replay" in emission:
+                evt_name, evt_data = emission["replay"]
                 replay_events.append(emission["replay"])
+                if evt_name == EVENT_ROUTE:
+                    last_route = evt_data.get("agent") or last_route
+                elif evt_name == EVENT_CART_UPDATE:
+                    cart_updated = True
             if emission.get("final_text"):
                 final_text = emission["final_text"]
             if emission.get("fallback"):
                 fallback_used = True
             if emission.get("cart_id"):
                 cart_id = emission["cart_id"]
+
+        # Approved cart write succeeded → nudge the buyer to complete the look.
+        # Captured into replay_events so the frontend rehydrates the prompt
+        # alongside the assistant message when scrolling back through history.
+        if body.approved and cart_updated:
+            yield sse(EVENT_OUTFIT_PROMPT, OUTFIT_PROMPT_PAYLOAD)
+            replay_events.append((EVENT_OUTFIT_PROMPT, OUTFIT_PROMPT_PAYLOAD))
 
         turn_id: int | None = None
         if final_text:
@@ -379,6 +455,17 @@ async def confirm(request: Request, body: ConfirmRequest) -> Any:
         else:
             await update_session_activity(body.session_id)
 
-        yield sse(EVENT_DONE, {"turn_id": turn_id, "fallback_used": fallback_used})
+        suggestions = await _safe_generate_suggestions(
+            graph, config, final_text, last_route
+        )
+
+        yield sse(
+            EVENT_DONE,
+            {
+                "turn_id": turn_id,
+                "fallback_used": fallback_used,
+                "suggestions": suggestions,
+            },
+        )
 
     return event_response(generator())

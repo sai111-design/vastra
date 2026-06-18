@@ -37,3 +37,6 @@ class VastraState(MessagesState):
     route: str                   # supervisor decision
     fallback_used: bool
     turn_count: int
+    # True between an approved update_cart and the next complete_look turn —
+    # the Outfit Builder reads it as a gate and clears it after it runs.
+    last_cart_action_confirmed: bool

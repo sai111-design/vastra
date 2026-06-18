@@ -52,11 +52,18 @@ def test_scopes_cover_the_five_tools():
     }
 
 
-def test_scopes_are_disjoint():
-    seen: set[str] = set()
-    for names in SCOPES.values():
-        assert not (seen & names), "a tool appears in more than one scope"
-        seen |= names
+def test_mutating_tools_belong_to_exactly_one_scope():
+    # Read-only tools (e.g. search_catalog) may legitimately appear in more
+    # than one scope — the Outfit Builder (E3) reuses search_catalog. But the
+    # mutating tool (update_cart) must remain isolated to the cart scope so
+    # the safety gate can't be bypassed via another agent's tool list.
+    mutating_tools = {"update_cart"}
+    for name in mutating_tools:
+        scopes_with_tool = [agent for agent, tools in SCOPES.items() if name in tools]
+        assert scopes_with_tool == ["cart"], (
+            f"mutating tool {name!r} must only appear in the cart scope, "
+            f"found in {scopes_with_tool}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -67,10 +74,11 @@ async def test_load_scoped_tools_partitions_by_scope(monkeypatch, fake_mcp_tools
 
     scoped = await load_scoped_tools("vastra-demo.myshopify.com")
 
-    assert set(scoped) == {"stylist", "cart", "support"}
+    assert set(scoped) == {"stylist", "cart", "support", "complete_look"}
     assert {t.name for t in scoped["stylist"]} == {"search_catalog", "get_product_details"}
     assert {t.name for t in scoped["cart"]} == {"get_cart", "update_cart"}
     assert {t.name for t in scoped["support"]} == {"search_shop_policies_and_faqs"}
+    assert {t.name for t in scoped["complete_look"]} == {"search_catalog"}
 
 
 async def test_load_scoped_tools_builds_streamable_http_url(monkeypatch, fake_mcp_tools):

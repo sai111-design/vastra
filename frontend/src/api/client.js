@@ -56,8 +56,13 @@ async function ssePost(url, body, onEvent) {
   }
 }
 
-export async function createSession() {
-  const res = await fetch(`${API}/sessions`, { method: 'POST' });
+export async function createSession(initialProfile = null) {
+  const init = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(initialProfile ? { initial_profile: initialProfile } : {}),
+  };
+  const res = await fetch(`${API}/sessions`, init);
   if (!res.ok) throw new Error('Failed to create session');
   return res.json();
 }
