@@ -257,7 +257,7 @@ export default function App() {
           <img src="/assets/vastra-mark-v2.png" alt="" className="sidebar-logo" />
           <span className="sidebar-brand">vastra</span>
         </div>
-        <button className="sidebar-new-btn" onClick={chat.createSession}>+ New conversation</button>
+        <button className="sidebar-new-btn" onClick={() => chat.createSession()}>+ New conversation</button>
         <div className="sidebar-sessions">
           {chat.sessions.map(s => (
             <div
@@ -303,7 +303,7 @@ export default function App() {
             </div>
           ))}
         </div>
-        <button className="mobile-fab" onClick={chat.createSession}>+</button>
+        <button className="mobile-fab" onClick={() => chat.createSession()}>+</button>
       </div>
 
       {/* ── Chat area ── */}

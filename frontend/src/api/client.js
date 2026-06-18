@@ -57,10 +57,16 @@ async function ssePost(url, body, onEvent) {
 }
 
 export async function createSession(initialProfile = null) {
+  // Guard against a bare onClick={createSession} accidentally passing the
+  // synthetic event as initialProfile. Only plain objects are valid here.
+  const isValidProfile =
+    initialProfile &&
+    typeof initialProfile === 'object' &&
+    !('nativeEvent' in initialProfile);
   const init = {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(initialProfile ? { initial_profile: initialProfile } : {}),
+    body: JSON.stringify(isValidProfile ? { initial_profile: initialProfile } : {}),
   };
   const res = await fetch(`${API}/sessions`, init);
   if (!res.ok) throw new Error('Failed to create session');
