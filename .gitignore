@@ -1,4 +1,7 @@
 .env
+.env.local
+.env.secrets
+.hf-secrets
 __pycache__/
 node_modules/
 dist/
