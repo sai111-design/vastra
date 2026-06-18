@@ -33,6 +33,9 @@ services:
       # Postgres is reachable as the service name `postgres` on its
       # internal port 5432.
       DATABASE_URL: postgresql://vastra:vastra@postgres:5432/vastra
+      # Pin postgres mode explicitly — the in-code default is now `sqlite`
+      # (better for HF Spaces) so compose must opt back into postgres.
+      DB_BACKEND: postgres
       # CORS for the vite dev server running in the sibling `frontend` container.
       CORS_ORIGIN: http://localhost:5173
     volumes:
