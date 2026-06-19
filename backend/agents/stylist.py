@@ -35,7 +35,7 @@ from backend.mcp.sanitize import sanitize_tool_output
 
 logger = logging.getLogger(__name__)
 
-MAX_PRODUCT_CARDS = 4
+MAX_PRODUCT_CARDS = 8
 
 # Told to the model when its tool budget runs out mid-plan, so it answers from
 # the data it already has instead of stalling on an unanswered tool call.

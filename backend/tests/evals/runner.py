@@ -400,6 +400,28 @@ def _assert_max_tool_calls(calls: list[dict], max_calls: int) -> list[str]:
     return []
 
 
+def _assert_min_products_returned(product_count: int, minimum: int) -> list[str]:
+    """The Stylist must surface at least ``minimum`` cards when several products match."""
+
+    if product_count < minimum:
+        return [
+            f"Multi-result: expected ≥{minimum} product_cards, got {product_count} "
+            "(Stylist narrowed too aggressively for a broad filtered query)"
+        ]
+    return []
+
+
+def _assert_max_products_returned(product_count: int, maximum: int) -> list[str]:
+    """A narrowing turn must collapse to at most ``maximum`` cards (typically 1)."""
+
+    if product_count > maximum:
+        return [
+            f"Narrowing: expected ≤{maximum} product_cards, got {product_count} "
+            "(Stylist did not collapse to a single item on the follow-up)"
+        ]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Build FakeLLMs from a YAML case
 # ---------------------------------------------------------------------------
@@ -582,13 +604,22 @@ async def run_case(case: dict, mcp_tools: Any) -> CaseResult:
                 turn_result.route_actual = route
                 turn_result.route_expected = expect.get("route", "")
 
-                # Reply text — last AIMessage in the output
+                # Reply text + product_cards — both ride the last AIMessage.
                 reply_text = ""
+                product_count = 0
                 msgs = out.get("messages", [])
                 for msg in reversed(msgs):
-                    if isinstance(msg, AIMessage) and msg.content:
+                    if not isinstance(msg, AIMessage):
+                        continue
+                    if not msg.content and not getattr(msg, "additional_kwargs", None):
+                        continue
+                    if msg.content:
                         reply_text = str(msg.content)
-                        break
+                    ak = getattr(msg, "additional_kwargs", {}) or {}
+                    cards = ak.get("product_cards") or {}
+                    products = cards.get("products") or []
+                    product_count = len(products)
+                    break
                 turn_result.reply_text = reply_text
 
                 # Update product_context for next turn
@@ -629,6 +660,20 @@ async def run_case(case: dict, mcp_tools: Any) -> CaseResult:
                 if "max_tool_calls" in expect:
                     failures.extend(
                         _assert_max_tool_calls(turn_calls, expect["max_tool_calls"])
+                    )
+
+                if "min_products_returned" in expect:
+                    failures.extend(
+                        _assert_min_products_returned(
+                            product_count, expect["min_products_returned"]
+                        )
+                    )
+
+                if "max_products_returned" in expect:
+                    failures.extend(
+                        _assert_max_products_returned(
+                            product_count, expect["max_products_returned"]
+                        )
                     )
 
                 turn_result.passed = len(failures) == 0

@@ -204,7 +204,11 @@ async def test_details_call_refines_card_without_losing_variants(fake_scoped_too
     assert any(v["id"] == _M_VARIANT_ID for v in tee["variants"])
 
 
-async def test_at_most_four_products(fake_scoped_tools):
+async def test_product_cards_capped_at_eight(fake_scoped_tools):
+    # The Two-Phase pattern (F2) widened the cap from 4 → 8 so a broad filtered
+    # query ("jeans under ₹500") can show the whole matching set. A search that
+    # returns MORE than the cap must still be truncated, so the SSE payload
+    # never balloons unbounded.
     many = {
         "products": [
             {
@@ -214,7 +218,7 @@ async def test_at_most_four_products(fake_scoped_tools):
                 "price_range": {"min": {"amount": 39900, "currency": "INR"}},
                 "variants": [],
             }
-            for n in range(6)
+            for n in range(12)
         ]
     }
     tools = [
@@ -228,7 +232,7 @@ async def test_at_most_four_products(fake_scoped_tools):
     result = await node(_state())
 
     cards = result["messages"][-1].additional_kwargs["product_cards"]
-    assert len(cards["products"]) == 4
+    assert len(cards["products"]) == 8
 
 
 def test_build_product_cards_skips_malformed_json():

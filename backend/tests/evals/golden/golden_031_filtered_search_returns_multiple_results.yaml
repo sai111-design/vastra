@@ -1,0 +1,40 @@
+id: golden_031_filtered_search_returns_multiple_results
+description: "Filtered category search surfaces ALL matches, narrowing only on follow-up"
+tags: [discovery, multi_result, two_phase, refinement]
+turns:
+  - user: "I need jeans under ₹500, size 32"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: search_catalog
+              args:
+                query: "jeans under 500 size 32"
+              id: tc1
+        - content: "Here are the jeans I found that match — pick one for full details."
+    expect:
+      route: stylist
+      tools:
+        - name: search_catalog
+          args_contains:
+            category: "jeans"
+            price_filter: "500"
+            size_filter: "32"
+      reply_must_not_invent: true
+      min_products_returned: 2
+  - user: "Tell me more about the cheapest one"
+    llm:
+      supervisor: '{"route": "stylist"}'
+      agent:
+        - tool_calls:
+            - name: get_product_details
+              args:
+                product_id: "gid://shopify/Product/8808632549464"
+              id: tc2
+        - content: "The Classic Black Tee is ₹399 — soft cotton crew-neck, a clean everyday cut."
+    expect:
+      route: stylist
+      tools:
+        - name: get_product_details
+      reply_must_not_invent: true
+      max_products_returned: 1
