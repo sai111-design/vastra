@@ -21,7 +21,7 @@
 | Mobile layout | CSS media query at 768px; cart = bottom sheet; sidebar → full-screen session list | Single breakpoint covers phone/tablet/desktop; bottom sheet is native-feeling on mobile |
 | Deployment | HF Spaces Docker SDK, SqliteSaver on /data | Free tier, persistent volume |
 | Eval harness engine | YAML-driven, graph-level, fully offline (FakeMCP + scripted FakeLLM) | Deterministic CI, zero API cost, tests the pipeline not the LLM |
-| Eval assertion types | Route, tool sequence, grounding (prices/URLs), write-gating, adversarial (must_not_contain/call/max_tool_calls) | Covers routing correctness, tool orchestration, hallucination boundary, safety |
+| Eval assertion types | Route, tool sequence, grounding (prices/URLs), write-gating, adversarial (must_not_contain/call/max_tool_calls), result-set size (min_products_returned/max_products_returned, F2) | Covers routing correctness, tool orchestration, hallucination boundary, safety, and the two-phase retrieval contract (broad recall on Phase 1, precision narrowing on Phase 2) |
 | Eval FakeLLM strategy | `EvalFakeLLM` (scripted sequence) for supervisor/stylist/support; `EvalCartLLM` (content-based) for cart turns | Cart re-execution needs deterministic replay; content-based LLM survives node re-runs |
 | Adversarial fixtures | `AdversarialFakeMCPTools` injects payloads into search/policy tool results | Same injection strings as `seed_injections.py` — CI and live-store test identical boundary |
 | Eval tool recording | `RecordingMCPTools` spy wrappers capture name+args+result per call | Enables tool sequence, grounding, and write-gating assertions without modifying agent code |
@@ -38,6 +38,9 @@
 | Windows async loop | Force `WindowsSelectorEventLoopPolicy` in tests | psycopg async cannot run on the Windows ProactorEventLoop (non-issue in Linux Docker) |
 | Supervisor structured output | Prompt-engineered JSON + `parse_route()` (NOT `.with_structured_output()`) | Robust to Groq tool-calling quirks; clean "default to stylist" path on any parse failure |
 | Stylist agent loop | Hand-rolled bounded ReAct (NOT `create_react_agent`) | Needs per-turn tool-call CAP, sanitiser on every result, and product_cards from raw tool JSON |
+| Stylist search shape (F2) | Two-phase pattern: broad result for category+filter, narrow on explicit follow-up | A buyer who says "jeans under ₹500, size 32" should see the whole matching shelf, not a single pick; narrowing happens only when the next message names a specific item ("the cheapest one", "the second one") |
+| product_cards cap (F2) | `MAX_PRODUCT_CARDS = 8` (was 4) | Phase-1 broad results need to surface the matching shelf; 8 is a UX ceiling — overflow gets a "…and a few more" in prose, never a silent slice to 1 |
+| search_catalog filter encoding | All filters (price ceiling, size, colour, occasion) ride in the natural-language `query` string | The live MCP tool schema is `{catalog:{query:string}}` only — there is no structured filter parameter to pass; the prompt instructs the model to encode every named filter into the query text |
 | product_cards transport | Final AIMessage `additional_kwargs` | Keeps `VastraState` exactly as specced; binds payload to the message for history replay |
 | Prompt context injection | `str.replace("{buyer_profile}", …)` (NOT `str.format`) | Prompts are full of literal JSON braces; `.format` would require escaping them all |
 | Tool budget accounting | Count EXECUTED tool calls; answer over-cap parallel calls with a "budget exhausted" ToolMessage | Enforces the 4-call cap while honouring the provider rule that every tool_call needs a response |
@@ -405,6 +408,7 @@ Source: `backend/tests/evals/runner.py`, `backend/tests/evals/golden/`, `backend
 - **grounding**: Asserts the final assistant message does not contain invented prices (₹NNN) or URLs not present in tool results.
 - **write_gating**: Asserts `update_cart` is never called without a preceding approved `interrupt()`.
 - **adversarial**: `must_not_contain`, `must_not_call`, `max_tool_calls` to ensure prompt injection and boundary testing.
+- **min_products_returned / max_products_returned (F2)**: Asserts the size of the final message's `additional_kwargs.product_cards.products` array. `min_products_returned` guards the Phase-1 contract (a broad filtered query must surface ≥ N cards, not collapse to one); `max_products_returned` guards the Phase-2 contract (a narrowing follow-up must collapse to ≤ N cards, typically 1). Counts the cards the SSE pipeline actually emits, not anything in the model's prose.
 
 ### Injections (`seed_injections.py`)
 - Shopify Admin GraphQL tool to seed injection payloads into product descriptions and policy texts.
@@ -418,19 +422,30 @@ Source: `backend/tests/evals/runner.py`, `backend/tests/evals/golden/`, `backend
 - Assured build transparency constraints (no ORM, no component libraries, provider agnostic).
 - Project is 100% complete.
 
-## Seed Catalog Summary
+## Seed Catalog Summary (post-expansion)
+
+Base catalog (`seed/catalog.csv`) + three additive expansion CSVs imported on top
+(`seed/catalog_jeans_expansion.csv`, `seed/catalog_accessories_footwear_expansion.csv`,
+`seed/catalog_ethnic_expansion.csv`). The expansion is sized so multi-result filtered
+search ("jeans under ₹500, size 32") returns several products instead of one, with
+deliberate sub-₹500 jeans variants seeded in.
 
 | Category | Products | Variant Rows | Price Range (₹) |
 |----------|----------|-------------|----------------|
 | T-Shirts | 5 | 16 | 399–549 |
 | Oversized Tees | 3 | 9 | 599–699 |
-| Jeans | 2 | 6 | 999–1099 |
+| Jeans | 10 | 35 | 399–1099 |
 | Joggers | 3 | 8 | 699–799 |
 | Dresses | 3 | 9 | 799–1099 |
-| Kurtas | 3 | 9 | 699–1299 |
-| Sneakers | 3 | 11 | 799–1499 |
-| Accessories | 4 | 7 | 299–599 |
-| **Total** | **26** | **75** | **299–1499** |
+| Kurtas | 8 | 29 | 699–1499 |
+| Sneakers | 7 | 29 | 599–1499 |
+| Accessories | 10 | 16 | 299–599 |
+| **Total** | **49** | **151** | **299–1499** |
+
+Per-category notes after the expansion:
+- **Jeans** — 3 products have at least one variant under ₹500 (Basic Straight Light Blue, Budget Slim Grey Wash, Stretch Skinny Black size 28). Sizes span 28–36 for "men's" lines (slim/skinny/distressed/bootcut/budget); women's lines span 28–34 (mom-fit, wide-leg, cropped).
+- **Kurtas** — Nehru Jacket (men's) is filed under the `Kurtas` Type to keep ethnic-wear browsing co-located; tag-filter `nehru-jacket` separates it from the women's kurta set.
+- **Sneakers** — Slip-ons / sandals / loafers are filed under the `Sneakers` Type for the same reason: one umbrella footwear browse. Tags (`sandals`, `loafers`, `running`) carry the sub-category.
 
 ## Environment Variables
 
