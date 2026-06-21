@@ -35,12 +35,23 @@ async def _check_db() -> str:
 
 
 def _check_mcp(request: Request) -> str:
-    """Return ``"ok"`` if MCP tools were loaded at startup, else ``"down"``."""
+    """Return ``"ok"`` once MCP tools are loaded.
 
-    tools = getattr(request.app.state, "tools_by_agent", None)
+    MCP discovery runs as a background task during lifespan (so the port binds
+    fast); ``mcp_ready`` flips True when that task succeeds. Before that, or
+    if discovery failed, report ``"loading"``/``"down"`` so the SPA and
+    monitoring can distinguish "still booting" from "tools not present".
+    """
+
+    state = request.app.state
+    if getattr(state, "mcp_ready", False):
+        return "ok"
+    tools = getattr(state, "tools_by_agent", None)
     if isinstance(tools, dict) and tools.get("stylist"):
         return "ok"
-    return "down"
+    # Background load still running OR finished without populating tools.
+    pending = any(not t.done() for t in getattr(state, "bg_tasks", ()) or ())
+    return "loading" if pending else "down"
 
 
 def _active_model() -> str:
