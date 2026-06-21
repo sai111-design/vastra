@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import '@testing-library/jest-dom';
 import App from '../App';
 import * as useChatStreamModule from '../hooks/useChatStream';
@@ -8,6 +8,13 @@ import * as useChatStreamModule from '../hooks/useChatStream';
 window.HTMLElement.prototype.scrollIntoView = vi.fn();
 
 describe('App component', () => {
+  beforeEach(() => {
+    // App renders the OnboardingFlow modal when vastra_onboarded isn't set,
+    // which would shadow the empty-state assertions below. Treat onboarding
+    // as already complete unless a test opts back in.
+    window.localStorage.setItem('vastra_onboarded', '1');
+  });
+
   it('renders loading state initially', () => {
     // Spy on useChatStream to return default unready state
     vi.spyOn(useChatStreamModule, 'default').mockReturnValue({
@@ -27,11 +34,18 @@ describe('App component', () => {
       cart: null,
       pendingConfirm: null,
       isStreaming: false,
+      suggestions: [],
+      shelfProducts: [],
+      buyerProfile: null,
+      dismissedOutfitPrompts: new Set(),
       createSession: vi.fn(),
       openSession: vi.fn(),
       sendMessage: vi.fn(),
       goBack: vi.fn(),
       toggleCart: vi.fn(),
+      clearSuggestions: vi.fn(),
+      confirmAction: vi.fn(),
+      dismissOutfitPrompt: vi.fn(),
     });
 
     render(<App />);
