@@ -12,7 +12,9 @@ spike — see Agent/implementations.md).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
@@ -28,6 +30,14 @@ SCOPES: dict[str, set[str]] = {
     # search per category. No cart writes, no details lookup.
     "complete_look": {"search_catalog"},
 }
+
+# HF Spaces marks a container "Starting" until /api/health responds, but it
+# never will if the FastAPI lifespan blocks here. Cap the discovery call so a
+# slow/unreachable Storefront MCP can't hold the whole app hostage at boot —
+# the app still comes up, /api/health reports mcp=down, and routes that need
+# tools fail fast with their normal "no tools" message. Configurable via
+# MCP_LOAD_TIMEOUT_SECONDS for tests / debug.
+_DEFAULT_LOAD_TIMEOUT_SECONDS = 20.0
 
 # langchain-mcp-adapters has renamed / aliased the streaming HTTP transport
 # across releases. Try the canonical name first, then documented fallbacks so
@@ -83,6 +93,29 @@ async def _fetch_tools(url: str) -> list:
     ) from last_error
 
 
+def _empty_scopes() -> dict[str, list]:
+    """Return the per-agent scope dict shape with no tools in any scope."""
+
+    return {agent: [] for agent in SCOPES}
+
+
+def _load_timeout_seconds() -> float:
+    """Read MCP_LOAD_TIMEOUT_SECONDS from env, fall back to the default."""
+
+    raw = os.environ.get("MCP_LOAD_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _DEFAULT_LOAD_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid MCP_LOAD_TIMEOUT_SECONDS=%r; using default %.1fs",
+            raw,
+            _DEFAULT_LOAD_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_LOAD_TIMEOUT_SECONDS
+
+
 async def load_scoped_tools(store_domain: str) -> dict[str, list]:
     """Load tools from the Storefront MCP and partition them by agent scope.
 
@@ -92,10 +125,31 @@ async def load_scoped_tools(store_domain: str) -> dict[str, list]:
     Returns:
         A dict keyed by agent name (``"stylist"``, ``"cart"``, ``"support"``)
         whose values are the subset of discovered tools that agent may call.
+        On timeout or fetch failure each scope is an empty list — the app
+        still boots and ``/api/health`` will report ``mcp=down``.
     """
 
     url = f"https://{store_domain}/api/mcp"
-    tools = await _fetch_tools(url)
+    timeout = _load_timeout_seconds()
+
+    try:
+        tools = await asyncio.wait_for(_fetch_tools(url), timeout=timeout)
+    except asyncio.TimeoutError:
+        logger.error(
+            "MCP tool discovery timed out after %.1fs against %s — "
+            "starting with empty tool scopes (mcp=down on /api/health)",
+            timeout,
+            url,
+        )
+        return _empty_scopes()
+    except Exception as exc:  # noqa: BLE001 - lifespan must not abort on MCP outage
+        logger.error(
+            "MCP tool discovery failed against %s: %s — starting with empty "
+            "tool scopes (mcp=down on /api/health)",
+            url,
+            exc,
+        )
+        return _empty_scopes()
 
     discovered = {t.name for t in tools}
     logger.info("MCP tools discovered: %s", sorted(discovered))
